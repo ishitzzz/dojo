@@ -16,9 +16,11 @@ import {
 import {
   analyzeQuery,
   filterByRelevance,
+  checkRelevance,
 } from "@/utils/queryIntelligence";
 import { fetchVideoDetails, YouTubeEnhancement } from "@/utils/youtubeClient";
 import { fetchIntroTranscripts } from "@/utils/transcriptClient";
+import { normalizeVideoSpec, bandToApiDuration, VideoSpec } from "@/utils/videoSpec";
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -58,6 +60,24 @@ function toVideoCandidates(videos: any[], count: number): VideoCandidate[] {
   }));
 }
 
+// Top candidates by relevance score BEFORE any duration filtering — used for
+// honest "no_good_match" reporting when the duration spec empties the pool.
+function buildBestCandidates(candidates: VideoCandidate[], subjects: string[]) {
+  return toVideoCandidates(candidates, candidates.length)
+    .map((v) => ({
+      videoId: v.videoId,
+      title: v.title,
+      channel: v.author.name,
+      duration: v.duration.timestamp,
+      relevanceScore:
+        subjects.length > 0
+          ? checkRelevance(v.title, v.description, subjects, CONFIG.RELEVANCE_THRESHOLD).score
+          : 0,
+    }))
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .slice(0, 5);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // MAIN HANDLER
 // ═══════════════════════════════════════════════════════════════
@@ -75,6 +95,8 @@ export async function GET(request: Request) {
   let topology: LearningTopology | undefined;
 
   const topologyParam = searchParams.get("topology");
+  let rawSpecInput: unknown;
+
   if (topologyParam) {
     try {
       topology = JSON.parse(topologyParam) as LearningTopology;
@@ -85,13 +107,41 @@ export async function GET(request: Request) {
     try {
       const rawBody = await request.text();
       if (rawBody) {
-        const parsedBody = JSON.parse(rawBody) as { topology?: LearningTopology };
+        const parsedBody = JSON.parse(rawBody) as { topology?: LearningTopology; spec?: unknown };
         topology = parsedBody.topology;
+        rawSpecInput = parsedBody.spec;
       }
     } catch (_e) {
       topology = undefined;
     }
   }
+
+  // Spec can also arrive as a JSON-encoded query param; it takes precedence over body.
+  const specParam = searchParams.get("spec");
+  let specIgnored = false;
+  if (specParam) {
+    try {
+      rawSpecInput = JSON.parse(specParam);
+    } catch (_e) {
+      console.warn("⚠️ Invalid spec param ignored:", specParam.slice(0, 80));
+      specIgnored = true;
+    }
+  }
+
+  const spec: VideoSpec | undefined =
+    rawSpecInput !== undefined && rawSpecInput !== null
+      ? normalizeVideoSpec(rawSpecInput)
+      : undefined;
+  const effectiveMinDuration = spec
+    ? Math.round(spec.expectedMinutes[0] * 60)
+    : CONFIG.MIN_VIDEO_DURATION;
+
+  // Shared across all search tiers so every tier honors the same constraints.
+  const videoDuration = spec ? bandToApiDuration(spec.targetDurationBand) : undefined;
+  const publishedAfter =
+    spec && spec.depth === "concept"
+      ? new Date(Date.now() - 3 * 365 * 24 * 3600 * 1000).toISOString()
+      : undefined;
 
   if (!query) {
     return NextResponse.json({
@@ -100,7 +150,9 @@ export async function GET(request: Request) {
     });
   }
 
-  const cacheKey = `${query}|${modifier}|${userRole}|${experience}|${preferredChannel || "none"}`;
+  const cacheKey = `${query}|${modifier}|${userRole}|${experience}|${preferredChannel || "none"}|${
+    spec ? `${spec.targetDurationBand}:${effectiveMinDuration}` : "nospec"
+  }`;
 
   // ═══════════════════════════════════════════════════════════════
   // STEP 1: Check Quick Cache
@@ -110,9 +162,11 @@ export async function GET(request: Request) {
     const mainVideoId = cached.videos ? cached.videos[0].videoId : cached.videoId;
     if (mainVideoId && !excludeIds.includes(mainVideoId)) {
       console.log(`⚡ Quick cache hit for: "${query.slice(0, 30)}..."`);
-      return NextResponse.json({ 
+      return NextResponse.json({
         videos: cached.videos || [{ videoId: cached.videoId, title: "Cached Video", channel: "Vault", duration: "0:00", reason: "Loaded from cache", isPick: true }],
-        source: "quick_cache" 
+        source: "quick_cache",
+        status: "ok",
+        ...(specIgnored ? { specIgnored: true } : {}),
       });
     } else {
       console.log(`🚫 Quick cache hit BUT excluded: ${mainVideoId}`);
@@ -128,7 +182,17 @@ export async function GET(request: Request) {
     // Check if the vault result is in the excluded list
     const isExcluded = vaultResult.entry && excludeIds.includes(vaultResult.entry.video_id);
 
-    if (vaultResult.found && vaultResult.entry && !isExcluded) {
+    // Spec-awareness guard: a cached entry is only usable when its recorded
+    // duration provably satisfies the requested spec floor — otherwise the hit
+    // is ignored and the normal search pipeline runs.
+    const entryDurationSeconds = vaultResult.entry?.metadata?.duration_seconds;
+    const meetsSpecFloor =
+      !spec ||
+      (typeof entryDurationSeconds === "number" &&
+        Number.isFinite(entryDurationSeconds) &&
+        entryDurationSeconds >= effectiveMinDuration);
+
+    if (vaultResult.found && vaultResult.entry && !isExcluded && meetsSpecFloor) {
       console.log(`💾 Vault hit for: "${query.slice(0, 30)}..." -> ${vaultResult.entry.video_id}`);
       const entryVid = {
         videoId: vaultResult.entry.video_id,
@@ -143,9 +207,13 @@ export async function GET(request: Request) {
       return NextResponse.json({
         videos: [entryVid],
         source: "video_vault",
+        status: "ok",
+        ...(specIgnored ? { specIgnored: true } : {}),
       });
     } else if (isExcluded) {
       console.log(`🚫 Vault hit BUT excluded: ${vaultResult.entry?.video_id}`);
+    } else if (vaultResult.found && !meetsSpecFloor) {
+      console.log(`⏭️ Vault hit ignored, below spec floor (${effectiveMinDuration}s): ${vaultResult.entry?.video_id}`);
     }
   } catch (error) {
     console.warn("⚠️ Vault check error:", error);
@@ -170,7 +238,16 @@ export async function GET(request: Request) {
     if (preferredChannel) {
       console.log(`⚓ Attempting Anchor Channel search for: ${preferredChannel}`);
       const anchorQuery = `"${preferredChannel}" ${query}`;
-      const anchorResult = await searchVideos(anchorQuery, { maxResults: CONFIG.INITIAL_FETCH_COUNT }, topology);
+      const anchorResult = await searchVideos(
+        anchorQuery,
+        {
+          maxResults: CONFIG.INITIAL_FETCH_COUNT,
+          videoDuration,
+          relevanceLanguage: "en",
+          publishedAfter,
+        },
+        topology
+      );
 
       if (anchorResult.length > 0) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -212,7 +289,16 @@ export async function GET(request: Request) {
 
     // --- TIER 1: SMART PRIMARY QUERY ---
     if (rawVideos.length === 0) {
-      const primaryResult = await searchVideos(smartQuery.primary, { maxResults: CONFIG.INITIAL_FETCH_COUNT }, topology);
+      const primaryResult = await searchVideos(
+        smartQuery.primary,
+        {
+          maxResults: CONFIG.INITIAL_FETCH_COUNT,
+          videoDuration,
+          relevanceLanguage: "en",
+          publishedAfter,
+        },
+        topology
+      );
       if (primaryResult.length > 0) {
         rawVideos = primaryResult;
         searchTierUsed = "smart_primary";
@@ -222,7 +308,16 @@ export async function GET(request: Request) {
     // --- TIER 2: FALLBACK QUERY (just subjects) ---
     if (rawVideos.length === 0) {
       console.warn("⚠️ Primary query returned 0. Trying fallback...");
-      const fallbackResult = await searchVideos(smartQuery.fallback, { maxResults: CONFIG.INITIAL_FETCH_COUNT }, topology);
+      const fallbackResult = await searchVideos(
+        smartQuery.fallback,
+        {
+          maxResults: CONFIG.INITIAL_FETCH_COUNT,
+          videoDuration,
+          relevanceLanguage: "en",
+          publishedAfter,
+        },
+        topology
+      );
       if (fallbackResult.length > 0) {
         rawVideos = fallbackResult;
         searchTierUsed = "smart_fallback";
@@ -232,7 +327,16 @@ export async function GET(request: Request) {
     // --- TIER 3: RAW QUERY (last resort) ---
     if (rawVideos.length === 0) {
       console.warn("⚠️ Fallback returned 0. Using raw query...");
-      const rawResult = await searchVideos(query, { maxResults: CONFIG.INITIAL_FETCH_COUNT }, topology);
+      const rawResult = await searchVideos(
+        query,
+        {
+          maxResults: CONFIG.INITIAL_FETCH_COUNT,
+          videoDuration,
+          relevanceLanguage: "en",
+          publishedAfter,
+        },
+        topology
+      );
       if (rawResult.length > 0) {
         rawVideos = rawResult;
         searchTierUsed = "raw_query";
@@ -365,15 +469,33 @@ export async function GET(request: Request) {
     // ═══════════════════════════════════════════════════════════════
     // STEP 7: Duration filter + Density scoring
     // ═══════════════════════════════════════════════════════════════
-    let filteredCandidates = filterByDuration(relevantCandidates, CONFIG.MIN_VIDEO_DURATION);
+    let filteredCandidates = filterByDuration(relevantCandidates, effectiveMinDuration);
     if (modifier !== "detailed") {
       filteredCandidates = filteredCandidates.filter(
         (v) => v.duration.seconds <= CONFIG.MAX_VIDEO_DURATION
       );
     }
 
+    // Honest empty state: never revert to off-spec candidates. If nothing in the
+    // relevant pool satisfies the duration window, report it instead of picking.
     if (filteredCandidates.length === 0) {
-      filteredCandidates = relevantCandidates;
+      console.warn(
+        `⏱️ No match within duration window [${effectiveMinDuration}s${
+          modifier === "detailed" ? "" : `–${CONFIG.MAX_VIDEO_DURATION}s`
+        }] for "${query.slice(0, 40)}..." — reporting no_good_match.`
+      );
+      return NextResponse.json({
+        status: "no_good_match",
+        reason:
+          `${relevantCandidates.length} relevant candidate(s) found, but none met the required ` +
+          `duration window (${Math.round(effectiveMinDuration / 60)} min minimum${
+            modifier === "detailed" ? "" : `, max ${Math.round(CONFIG.MAX_VIDEO_DURATION / 60)} min`
+          }).`,
+        videos: [],
+        bestCandidates: buildBestCandidates(relevantCandidates, smartQuery.subjects),
+        query,
+        ...(specIgnored ? { specIgnored: true } : {}),
+      });
     }
 
     const rankedCandidates = rankByDensity(filteredCandidates);
@@ -495,6 +617,7 @@ export async function GET(request: Request) {
     });
 
     return NextResponse.json({
+      status: "ok",
       videos: finalVideos,
       source: selectionSource,
       debug: {
@@ -502,6 +625,7 @@ export async function GET(request: Request) {
         usedAnchorChannel: searchTierUsed === "anchor_channel",
         searchTier: searchTierUsed,
       },
+      ...(specIgnored ? { specIgnored: true } : {}),
     });
 
   } catch (error) {

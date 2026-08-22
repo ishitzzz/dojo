@@ -3,6 +3,7 @@ import { BACKUP_ROADMAPS } from "@/data/backupRoadmaps";
 import { NextResponse } from "next/server";
 import { safeParseJsonObject } from "@/utils/safeJsonParser";
 import { inferTopology } from "@/utils/topologyInference";
+import { normalizeVideoSpec } from "@/utils/videoSpec";
 
 function extractTopicsFromSkeleton(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -22,6 +23,38 @@ function extractTopicsFromSkeleton(
   }
 
   return topics;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED VIDEO-SPEC PROMPT FRAGMENTS — single source of truth so the
+// skeleton and module prompts cannot drift apart.
+// ═══════════════════════════════════════════════════════════════
+const VIDEO_SPEC_RULES = `        VIDEO SPEC RULES (every chapter MUST include videoSpec):
+        - Concept/intro chapters: targetDurationBand "short" or "medium" with low expectedMinutes (e.g. [4, 15]).
+        - Deep/advanced/implementation/mastery chapters: targetDurationBand "long" with expectedMinutes [20, 90].
+        - stylePriority must match the chapter's nature: ["tutorial"] or ["deep_dive", "tutorial"] for how-to
+          chapters; ["lecture"], ["documentary"] or ["lecture", "documentary"] for conceptual ones.
+        - depth: "concept" for foundational chapters, "implementation" for build/setup chapters,
+          "mastery" for optimization/edge-case chapters.`;
+
+const VIDEO_SPEC_SCHEMA = `"videoSpec": {
+                      "targetDurationBand": "short" | "medium" | "long",
+                      "expectedMinutes": [number, number],
+                      "stylePriority": ["lecture" | "tutorial" | "documentary" | "deep_dive"],
+                      "depth": "concept" | "implementation" | "mastery"
+                    }`;
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED CHAPTER NORMALIZATION — used by both the modules and top-level
+// chapters response paths.
+// ═══════════════════════════════════════════════════════════════
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeChapters(chapters: any): void {
+  if (!Array.isArray(chapters)) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  chapters.forEach((c: any) => {
+    c.videoSpec = normalizeVideoSpec(c.videoSpec);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -175,7 +208,9 @@ ${nexusContextBlock}
         IF primaryMode is 'skill':
           Every chapter must have a youtubeQuery that includes action words:
           'how to', 'build', 'implement', 'create', 'practice'
-        
+
+        ${VIDEO_SPEC_RULES}
+
         RETURN JSON ONLY:
         {
           "courseTitle": "The Evolutionary Path to [Topic]",
@@ -192,10 +227,11 @@ ${nexusContextBlock}
                      "chapterTitle": "Specific micro-concept",
                      "youtubeQuery": "Specific search query (include '${userGoal}')",
                      "narrativeBridge": "Reasoning...",
-                     "toolType": "analogy",
-                     "gamePayload": { "concept": "...", "analogy": "...", "explanation": "..." }
-                  }
-              ]
+                      "toolType": "analogy",
+                      "gamePayload": { "concept": "...", "analogy": "...", "explanation": "..." },
+                      ${VIDEO_SPEC_SCHEMA}
+                   }
+               ]
             },
             {
               "moduleTitle": "Stage 3: [Name] (Skeleton)",
@@ -243,6 +279,11 @@ ${nexusContextBlock}
            - Implementation Phase: Append "tutorial", "code", "implementation", or "guide".
            - Mastery Phase: Append "advanced", "deep dive", "optimization".
 
+        ${VIDEO_SPEC_RULES}
+        - Module pacing mapping: concept chapters = Module 1-2; implementation chapters = Module 3-5
+          (may widen to targetDurationBand "medium" with expectedMinutes matching build complexity,
+          e.g. [10, 45]); mastery chapters = Module 6+.
+
         RETURN JSON ONLY:
         {
           "chapters": [
@@ -251,7 +292,8 @@ ${nexusContextBlock}
                "youtubeQuery": "Specific search query (adhering to pacing rules)",
                "narrativeBridge": "Reasoning for this step...",
                "toolType": "analogy",
-               "gamePayload": { "concept": "...", "analogy": "...", "explanation": "..." }
+               "gamePayload": { "concept": "...", "analogy": "...", "explanation": "..." },
+               ${VIDEO_SPEC_SCHEMA}
              }
           ]
         }
@@ -281,6 +323,7 @@ ${nexusContextBlock}
       if (m.chapters.length > 0 && (m.chapters.length < 2 || m.chapters.length > 6)) {
         console.warn(`[Validation] Module has ${m.chapters.length} chapters, should be 2-6`);
       }
+      normalizeChapters(m.chapters);
       m.chapters.forEach((c: any) => {
         const q = c.youtubeQuery?.toLowerCase() || "";
         const title = c.chapterTitle?.toLowerCase() || "";
@@ -294,6 +337,8 @@ ${nexusContextBlock}
         }
       });
     });
+
+    normalizeChapters(data.chapters);
 
     if (mode === "skeleton") {
       const extractedTopics = extractTopicsFromSkeleton(data);

@@ -1,12 +1,13 @@
 import type { LearningTopology } from "@/utils/topologyInference";
+import { BAND_RANGES, type DurationBand } from "./videoSpec.ts";
 
 const USE_YT_API = !!process.env.YOUTUBE_API_KEY;
 
-type VideoDuration = "short" | "medium" | "long";
-
 type SearchVideosOptions = {
   maxResults?: number;
-  videoDuration?: VideoDuration;
+  videoDuration?: DurationBand;
+  relevanceLanguage?: string;
+  publishedAfter?: string;
 };
 
 type YtSearchVideo = {
@@ -57,11 +58,27 @@ function secondsToTimestamp(totalSeconds: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
-async function fallbackYtSearch(query: string, maxResults: number): Promise<YtSearchVideo[]> {
+function matchesDurationBand(seconds: number, band: DurationBand): boolean {
+  // Unknown durations (0) are never rejected — filter gracefully skips them.
+  if (!Number.isFinite(seconds) || seconds <= 0) return true;
+  if (band === "short") return seconds < BAND_RANGES.SHORT_MAX_SECONDS;
+  if (band === "medium")
+    return (
+      seconds >= BAND_RANGES.SHORT_MAX_SECONDS &&
+      seconds <= BAND_RANGES.MEDIUM_MAX_SECONDS
+    );
+  return seconds > BAND_RANGES.MEDIUM_MAX_SECONDS;
+}
+
+async function fallbackYtSearch(
+  query: string,
+  maxResults: number,
+  videoDuration?: DurationBand
+): Promise<YtSearchVideo[]> {
   const mod = await import("yt-search");
   const yts = mod.default;
   const result = await yts(query);
-  return ((result.videos || []) as FallbackYtVideo[]).slice(0, maxResults).map((video) => ({
+  const mapped = ((result.videos || []) as FallbackYtVideo[]).map((video) => ({
     videoId: video.videoId,
     title: video.title || "",
     description: video.description || "",
@@ -71,6 +88,14 @@ async function fallbackYtSearch(query: string, maxResults: number): Promise<YtSe
     views: video.views || 0,
     thumbnail: video.thumbnail || "",
   }));
+
+  // Duration-band post-filter runs BEFORE slicing so matching results beyond
+  // the requested count are not discarded.
+  const videos = videoDuration
+    ? mapped.filter((video) => matchesDurationBand(video.seconds, videoDuration))
+    : mapped;
+
+  return videos.slice(0, maxResults);
 }
 
 export function buildSearchQuery(
@@ -108,12 +133,12 @@ export async function searchVideos(
   const finalQuery = buildSearchQuery(query, topology);
 
   if (!USE_YT_API) {
-    return fallbackYtSearch(finalQuery, maxResults);
+    return fallbackYtSearch(finalQuery, maxResults, options.videoDuration);
   }
 
   const apiKey = process.env.YOUTUBE_API_KEY;
   if (!apiKey) {
-    return fallbackYtSearch(finalQuery, maxResults);
+    return fallbackYtSearch(finalQuery, maxResults, options.videoDuration);
   }
 
   try {
@@ -126,6 +151,12 @@ export async function searchVideos(
 
     if (options.videoDuration) {
       searchUrl.searchParams.set("videoDuration", options.videoDuration);
+    }
+    if (options.relevanceLanguage) {
+      searchUrl.searchParams.set("relevanceLanguage", options.relevanceLanguage);
+    }
+    if (options.publishedAfter) {
+      searchUrl.searchParams.set("publishedAfter", options.publishedAfter);
     }
 
     const searchResponse = await fetch(searchUrl.toString(), { cache: "no-store" });
@@ -220,7 +251,7 @@ export async function searchVideos(
       .filter((video: YtSearchVideo | null): video is YtSearchVideo => video !== null);
   } catch (error) {
     console.warn("⚠️ YouTube Data API failed, falling back to yt-search:", error);
-    return fallbackYtSearch(finalQuery, maxResults);
+    return fallbackYtSearch(finalQuery, maxResults, options.videoDuration);
   }
 }
 
