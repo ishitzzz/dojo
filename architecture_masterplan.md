@@ -78,32 +78,37 @@ discipline layer (cache-first routing, daily budgets), test suite, observability
 | # | Feature | Ships | Blocked by |
 |---|---|---|---|
 | A1 | Schema repairs + auth foundation | migrations (nexus_cache, learning_contexts, video_vault reconciliation), sign-in (Supabase Auth), RLS policies on all tables, user_id threading everywhere | — |
-| A2 | UnifiedContext + CapabilityRegistry + orchestrator shell | context.ts, registry.ts, manifests, startTurn() facade; /api/turn accepts capability param | A1 |
-| A3 | Prompt assembler + personas | fixed block precedence, dojo-mentor/peer/examiner presets, eager injection | A2 |
-| A4 | Memory L3 | memory_docs migration, read_memory/write_memory tools, auto-injection (L3-concat) | A1,A2 |
-| A5 | Skills manifest + read_skill tool + composeEnabledTools | tri-state mounting policy ported verbatim | A2 |
-| A6 | Capability cutover wave 1 | tutor_chat, architect (topology→research→skeleton→validate spine), examiner (Feynman gate: cannot advance until feynman_passed); delete chat-companion/generate-roadmap/validate-feynman routes | A3–A5 |
-| A7 | Groq adapter + provider registry | ChatProvider interface done properly; failover absorbed as transport detail | A2 |
-Acceptance highlights: every AI touchpoint goes through /api/turn; persona
-switch changes tone; memory persists across sessions; Feynman gate blocks
-module advance; zero direct generateContent calls outside providers/.
+| A2 | UnifiedContext + CapabilityRegistry + orchestrator shell | context.ts (tri-state enabledTools, metadata.waitForUserReply callback), BaseCapability {manifest; run(context, stream)}, registry keyed by string, startTurn() facade, emit_capability_result() carrying {response, completed, engine stats, cost_summary}; /api/turn accepts capability param | A1 |
+| A3 | Prompt assembler + personas + Persona Studio | fixed block precedence (general → policy → loop contract → capability playbook → persona → memory → tools → skills); built-in dojo-mentor/peer/examiner loaders; **Persona Studio**: user-created personas (name, prompt block, narration voice, model pref) stored in `personas` table, CRUD API, selector in chat dock, one active, eager injection | A2 |
+| A4 | Full memory stack L1+L2+L3 | **L1 working** (per-turn scratchpad: current chapter, open questions, tool results windowed); **L2 project notebook** (`learning_contexts` repaired: highlights, notes, whiteboard exports, arXiv annotations — written by UI + Research Copilot, read by capabilities); **L3 durable profile** (`memory_docs`: preferences, learned style, goals — readMemory concat-on-inject / writeMemory preference tool); all three exposed as tools AND auto-injected per layer policy (L1 always, L2 on topic match, L3 eager) | A1,A2 |
+| A5 | ToolRegistry depth + mounting policy | BaseTool contract, alias map, toOpenAiSchema(), deferred/progressive tool disclosure, allowlist refusals, missing-arg guard; **parallel dispatch cap raised 4→8** with dedupe; ask_user pause semantics (WAIT_FOR_INPUT event) vs terminate outcomes; forced/suppressed finish; byte-stable system prompt with volatile seeds appended to user msg; composeEnabledTools = pure function (toggles ∩ whitelist → context-gated auto-mounts → capability-owned → always-on) | A2 |
+| A6 | Deep Research capability (8–9 specialists) | `deep_research` capability fans out bounded parallel sub-loops: **scout** (decompose question), **source-hunter** (web/docs), **video-scout** (Data API multi-query), **transcript-miner**, **resource-curator** (Scrapling allowlist), **critic** (fact-check/contradiction pass), **synthesizer** (merge findings), **outline-architect** (teaching order), **gap-analyzer** (what's missing → follow-up queries); streams THINKING/SOURCES/STAGE events per specialist; budget-capped rounds; result = cited brief + sources + gaps → optional auto-roadmap patch proposal | A5 |
+| A7 | Provider registry complete | ChatProvider interface done properly: Gemini + Groq adapters; key-pool failover absorbed as transport detail; per-capability model override (from persona/preset) | A2 |
+| A8 | Capability cutover waves | Wave 1: tutor_chat, architect (topology→research→skeleton→validate spine), examiner (**Feynman gate**: cannot advance until feynman_passed). Wave 2: nexus_curator (generate-nexus/expand-node → knowledge_nodes/node_edges tables finally used), roadmap_surgeon, conversation_guide; DELETE legacy routes (chat-companion, generate-roadmap, validate-feynman, generate-nexus, expand-node, roadmap-surgeon, conversation-guide) | A3–A5 |
+Acceptance highlights: every AI touchpoint goes through /api/turn with a
+capability; persona switch changes tone AND voice; L1/L2/L3 each provably
+read/written; Feynman gate blocks module advance; deep_research produces a
+cited multi-source brief from 8–9 named specialists; zero direct
+generateContent calls outside providers/.
 
 ### Phase B — Long-Video Mastery Journey (Wk 2–3)
 | # | Feature | Ships | Blocked by |
 |---|---|---|---|
-| B1 | Beat player integration | embedded player seeks to beat.startSec, beat list synced to playback, keyboard nav | — |
-| B2 | Check gates | pause at beat end → question/summary/flowchart picker; pass→continue; fail→B3 | B1 |
-| B3 | Whiteboard re-explain loop | failed beat → auto explain_board turn scoped to that beat's transcript chunk → resume | B2, M5 |
-| B4 | Progress + resume | beat_progress table, cross-session resume banner, % mastery per video | B2, A1 |
-| B5 | Mastery gating | video journey completion feeds examiner/Feynman state; module lock/unlock | B4, A6 |
-Acceptance: a 7h course watched as gated 10-min sprints; failing a beat gets a
-whiteboard re-teach; closing mid-journey resumes exactly.
+| B1 | Beat player integration | embedded player seeks to beat.startSec, beat list synced to playback (current-beat highlight, keyboard nav), beat progress bar | — |
+| B2 | Check gate suite (full test/game types) | pause at each beat end → check picker driven by beat content: **quiz** (auto-generated 2–3 question bank per beat: MCQ + short answer), **summary** (learner writes; LLM-scored vs beat transcript), **flowchart reconstruction** (place given nodes → connect edges → validated vs gold graph), **mini-games**: term-matching pairs, fill-in-the-blank commands/code, step-ordering drag, true/false rapid-fire; pass threshold configurable per depth | B1 |
+| B3 | Remediation ladder on fail | fail → inline hint → **whiteboard re-explain of THAT beat** (auto explain_board turn scoped to beat transcript) → micro-recap clip (beat summary TTS) → alternative-video fallback for the segment; each rung logged as a mastery datapoint | B2, M5 |
+| B4 | Progress + resume + spaced repetition | `beat_progress` table (per user/beat: attempts, score, remediation used); cross-session resume banner; **failed beats resurface** next session via simple spaced-repetition queue; % mastery per video/module; XP + streaks + badges (light gamification, no leaderboards v1) | B3, A1 |
+| B5 | Mastery gating | journey completion feeds examiner/Feynman state (feynman_passed, confusion_count in user_progress — table exists, finally wired); module lock/unlock; examiner can pull any failed beat as exam material | B4, A8 |
+Acceptance: a 7h course becomes gated 10-min sprints with mixed
+question/summary/flowchart/mini-game checks; failing a flowchart reconstruction
+gets a whiteboard re-teach then a retry; closing mid-journey resumes exactly;
+two failed beats auto-surface at next session start.
 
 ### Phase C — Whiteboard Intelligence (Wk 3–4)
 | # | Feature | Ships | Blocked by |
 |---|---|---|---|
 | C1 | Diagram grammar v2 | typed templates: flowchart/sequence/comparison/timeline/state/mindmap; layout engine (grid+collision) | — |
-| C2 | Diagram-planner sub-agents | planner picks diagram type(s) per concept chunk; layout-agent assigns coordinates; drawer emits commands — runs as parallel brain sub-tasks | C1, A6 |
+| C2 | Diagram-planner sub-agents | pipeline of specialist passes over each concept chunk: **concept-chunker** (splits explanation into drawable units) → **type-selector** (picks flowchart/sequence/comparison/timeline/state/mindmap per unit from the grammar) → **layout-engine** (grid assignment + collision resolution — no overlapping labels ever) → **drawer** (emits typed commands per template recipe: labeled 4-pt boxes, arrow+V-head connectors, swimlanes for sequence) → **critic** (visual-QA pass: overlap/legibility check, re-layout on fail); runs as parallel brain sub-tasks with STAGE events | C1, A6 |
 | C3 | Streaming scenes | planner streams scene-by-scene (kill the 9s dead time); NARRATION precedes its DRAW_DELTAs live | C2 |
 | C4 | Persistence + export | save/replay boards, PNG/SVG export, share link | C1 |
 | C5 | Voice upgrade | voice selection, per-persona narration style, rate control persisted | A3 |
@@ -115,7 +120,7 @@ flowchart + sequence diagram, drawn scene-by-scene with zero dead time.
 |---|---|---|---|
 | D1 | TurnEvent transport | extension ↔ brain over SSE/WS with session continuity; side panel chat = tutor_chat anywhere | A6 |
 | D2 | Watch-page mode | youtube.com content script strips feed/sidebar/comments, kills autoplay-next | — |
-| D3 | Practice Engine full port | FolloMe resolver stack (~1.5k LOC): buildSelector, ElementMatcher, RecoveryEngine, DOMStabilityMonitor, SyncController + EXECUTE_GUIDANCE controller; hint ladder (nudge→explain→show-me); works on figma/docs/arxiv adapters | A6 |
+| D3 | Practice Engine full port | FolloMe resolver stack (~1.5k LOC): buildSelector, ElementMatcher (+50 text/+30 type/+20 aria), RecoveryEngine tiers, DOMStabilityMonitor (weighted mutation threshold 30), SyncController version-checked pipelines, detectCanvasHeavy CDP Input.dispatchMouseEvent flip, pre/post-click dud detection + network-idle gating, UI-TARS vision grounding as last escalation; **PracticePlan anchor chain schema**: data-testid → aria-label → text-anchor → CSS path → region fingerprint; hint ladder (nudge → explain → show-me); authoring via vendored TipTour recorder.js (797 lines, record/replay); ~200-line EXECUTE_GUIDANCE controller; offscreen document for player events; works on figma/docs/arxiv adapters | A6 |
 | D4 | Research Copilot | arXiv/journal extractor (title/abstract/sections/figures), section-by-section walkthrough, highlights→platform notebook/memory | D1, A4 |
 | D5 | Resource sniffer (cat-catch lineage) | webRequest send/response pairing for PDFs/slides/datasets; WebVTT subtitle enumeration; MSE capture; segment downloader for link-rot archives → feeds find_resources | D1 |
 | D6 | Token auth + security pass | platform-issued tokens, strip telemetry monkey-patches, all_frames, event-driven MV3 lifecycle | A1, D1 |
