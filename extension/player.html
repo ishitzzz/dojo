@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dojo Companion</title>
+    <link rel="stylesheet" href="player.css" />
+  </head>
+  <body>
+    <main id="app">
+      <header id="head">
+        <h1 id="lesson-title">Focus lesson</h1>
+        <span id="chapter-chip" hidden></span>
+      </header>
+
+      <div id="player-shell">
+        <iframe
+          id="yt-player"
+          title="Lesson player"
+          allow="accelerometer; autoplay; encrypted-media; picture-in-picture; fullscreen"
+          allowfullscreen
+        ></iframe>
+
+        <section id="end-card" hidden>
+          <h2>Lesson complete</h2>
+          <p>Your watch progress was saved.</p>
+          <div id="end-actions"></div>
+        </section>
+      </div>
+
+      <footer id="foot">
+        <button id="exit-btn" type="button">Exit lesson</button>
+        <span id="meter"></span>
+        <span id="status" role="status" aria-live="polite">Starting…</span>
+      </footer>
+    </main>
+
+    <script src="player.js"></script>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Dojo Companion",
+  "version": "0.1.0",
+  "description": "Distraction-free focus player for Learning Dojo lessons with watch-progress telemetry.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://www.youtube-nocookie.com/*",
+    "https://www.youtube.com/*",
+    "https://*.googleapis.com/*"
+  ],
+  "action": {
+    "default_title": "Dojo Companion",
+    "default_popup": "player.html"
+  }
+}
