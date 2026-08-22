@@ -10,6 +10,8 @@ export type TurnEventType =
     | "STAGE_END"
     | "THINKING"
     | "CONTENT"
+    | "NARRATION"
+    | "DRAW_DELTA"
     | "TOOL_CALL"
     | "TOOL_RESULT"
     | "SOURCES"

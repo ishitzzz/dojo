@@ -1,4 +1,5 @@
 import { makeEvent, TurnEvent, TurnEventType } from "../types/events";
+import type { DrawCommand } from "../../whiteboard/commands";
 
 // ═══════════════════════════════════════════════════════════════
 // TurnBus — per-turn pub/sub spine.
@@ -118,6 +119,34 @@ export class TurnBus {
             makeEvent("TOOL_RESULT", this.sessionId, this.nextSeq(), {
                 source: "agent",
                 metadata: { name, result },
+            })
+        );
+    }
+
+    stageStart(stage: string): void {
+        this.emit(
+            makeEvent("STAGE_START", this.sessionId, this.nextSeq(), {
+                source: "brain",
+                stage,
+            })
+        );
+    }
+
+    narration(text: string, metadata?: Record<string, unknown>): void {
+        this.emit(
+            makeEvent("NARRATION", this.sessionId, this.nextSeq(), {
+                source: "brain",
+                content: text,
+                metadata,
+            })
+        );
+    }
+
+    drawDelta(sceneIndex: number, command: DrawCommand): void {
+        this.emit(
+            makeEvent("DRAW_DELTA", this.sessionId, this.nextSeq(), {
+                source: "brain",
+                metadata: { sceneIndex, command },
             })
         );
     }

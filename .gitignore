@@ -24,6 +24,7 @@ playlist-forge/node_modules/
 # misc
 .DS_Store
 *.pem
+.tfbuild/
 
 # debug
 npm-debug.log*
