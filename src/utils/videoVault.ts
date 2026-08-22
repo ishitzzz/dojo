@@ -24,6 +24,8 @@ export interface VideoVaultEntry {
         query_used: string;
         user_role?: string;
         experience_level?: string;
+        /** Chapter context hash; absent on legacy rows written before M3 cleanup. */
+        context_key?: string;
     };
 }
 
@@ -41,10 +43,12 @@ const LOCAL_CACHE = new Map<string, VideoVaultEntry>();
 const QUERY_HASH_CACHE = new Map<string, string>(); // query -> videoId
 
 /**
- * Generate a simple hash for cache key
+ * Generate a simple hash for cache key. `contextKey` carries the chapter
+ * context hash so identical search phrases in different roadmap positions
+ * never collide.
  */
-function hashQuery(query: string, role: string, experience: string): string {
-    const normalized = `${query.toLowerCase().trim()}|${role}|${experience}`;
+function hashQuery(query: string, role: string, experience: string, contextKey = ""): string {
+    const normalized = `${query.toLowerCase().trim()}|${role}|${experience}|${contextKey}`;
     let hash = 0;
     for (let i = 0; i < normalized.length; i++) {
         const char = normalized.charCodeAt(i);
@@ -61,9 +65,10 @@ function hashQuery(query: string, role: string, experience: string): string {
 export async function checkVideoVault(
     query: string,
     userRole: string,
-    experienceLevel: string
+    experienceLevel: string,
+    contextKey = ""
 ): Promise<CacheCheckResult> {
-    const cacheKey = hashQuery(query, userRole, experienceLevel);
+    const cacheKey = hashQuery(query, userRole, experienceLevel, contextKey);
 
     // Check local cache first
     if (QUERY_HASH_CACHE.has(cacheKey)) {
@@ -78,7 +83,7 @@ export async function checkVideoVault(
     // If Supabase is configured, check there
     if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
         try {
-            return await checkSupabaseVault(query, userRole, experienceLevel);
+            return await checkSupabaseVault(query, userRole, experienceLevel, contextKey);
         } catch (error) {
             console.warn("⚠️ Supabase check failed, using local cache:", error);
         }
@@ -94,9 +99,10 @@ export async function storeInVideoVault(
     entry: VideoVaultEntry,
     query: string,
     userRole: string,
-    experienceLevel: string
+    experienceLevel: string,
+    contextKey = ""
 ): Promise<boolean> {
-    const cacheKey = hashQuery(query, userRole, experienceLevel);
+    const cacheKey = hashQuery(query, userRole, experienceLevel, contextKey);
 
     // Always store in local cache
     LOCAL_CACHE.set(entry.video_id, entry);
@@ -107,7 +113,7 @@ export async function storeInVideoVault(
     // If Supabase is configured, store there too
     if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
         try {
-            await storeInSupabase(entry);
+            await storeInSupabase(entry, contextKey);
             return true;
         } catch (error) {
             console.warn("⚠️ Supabase store failed:", error);
@@ -139,7 +145,8 @@ export function clearLocalCache(): void {
 async function checkSupabaseVault(
     query: string,
     userRole: string,
-    experienceLevel: string
+    experienceLevel: string,
+    contextKey = ""
 ): Promise<CacheCheckResult> {
     // Dynamic import to avoid errors when Supabase isn't installed
     const { createClient } = await import("@supabase/supabase-js");
@@ -153,12 +160,18 @@ async function checkSupabaseVault(
     // For now, use exact match on normalized query
     const normalizedQuery = query.toLowerCase().trim();
 
-    const { data, error } = await supabase
+    let vaultQuery = supabase
         .from("video_vault")
         .select("*")
         .eq("metadata->>query_used", normalizedQuery)
-        .eq("metadata->>user_role", userRole)
-        .limit(1);
+        .eq("metadata->>user_role", userRole);
+
+    // Only filter on context_key when one was provided — legacy rows have none.
+    if (contextKey) {
+        vaultQuery = vaultQuery.eq("metadata->>context_key", contextKey);
+    }
+
+    const { data, error } = await vaultQuery.limit(1);
 
     if (error) {
         throw error;
@@ -175,13 +188,20 @@ async function checkSupabaseVault(
     return { found: false };
 }
 
-async function storeInSupabase(entry: VideoVaultEntry): Promise<void> {
+async function storeInSupabase(entry: VideoVaultEntry, contextKey = ""): Promise<void> {
     const { createClient } = await import("@supabase/supabase-js");
 
     const supabase = createClient(
         process.env.SUPABASE_URL!,
         process.env.SUPABASE_KEY!
     );
+
+    // Persist the chapter context key so cross-chapter collisions can be
+    // filtered at read time (no schema migration needed).
+    const metadata = {
+        ...entry.metadata,
+        ...(contextKey ? { context_key: contextKey } : {}),
+    };
 
     const { error } = await supabase.from("video_vault").upsert({
         video_id: entry.video_id,
@@ -190,7 +210,7 @@ async function storeInSupabase(entry: VideoVaultEntry): Promise<void> {
         transcript_snippet: entry.transcript_snippet,
         density_score: entry.density_score,
         density_flags: entry.density_flags,
-        metadata: entry.metadata,
+        metadata,
     }, {
         onConflict: "video_id",
     });

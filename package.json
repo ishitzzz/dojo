@@ -25,8 +25,10 @@
     "reactflow": "^11.11.4",
     "remark-gfm": "^4.0.1",
     "youtube-caption-scraper": "^1.0.0",
+    "youtube-dl-exec": "^3.1.12",
     "youtube-sr": "^4.3.12",
     "youtube-transcript": "^1.2.1",
+    "youtubei.js": "^18.0.0",
     "yt-search": "^2.13.1",
     "ytdl-core": "^4.11.5"
   },
@@ -40,5 +42,8 @@
     "eslint-config-next": "16.1.1",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "allowScripts": {
+    "youtube-dl-exec@3.1.12": true
   }
 }

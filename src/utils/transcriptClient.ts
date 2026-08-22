@@ -1,15 +1,22 @@
 /**
- * 👂 Transcript Sentinel Client (Python Bridge)
- * 
- * Uses `youtube_transcript_api` (Python) to fetch the "Intro" (First 60s).
- * This bypasses the blocks that affect Node.js scrapers.
+ * 👂 Transcript Client — facade over the Transcript Forge orchestrator.
+ *
+ * Public signatures are frozen: `/api/get-transcript`, `lib/learning/beats`
+ * and `get-video` Sentinel all import from here. The resilient multi-provider
+ * machinery lives in `utils/transcript/`; this file only adapts it.
  */
 
-import { exec } from "child_process";
-import path from "path";
-import util from "util";
+import { getTranscript } from "./transcript";
+import { TranscriptUnavailableError } from "./transcript/types";
+import { mapWithConcurrency } from "./transcript/limiter";
 
-const execPromise = util.promisify(exec);
+export interface TranscriptSegment {
+    text: string;
+    /** Offset from video start, in milliseconds. */
+    offsetMs: number;
+    /** Segment duration in milliseconds. */
+    durationMs: number;
+}
 
 export interface TranscriptSnippet {
     videoId: string;
@@ -17,58 +24,63 @@ export interface TranscriptSnippet {
     isAvailable: boolean;
 }
 
+/** Fetch the full timestamped transcript for a video. Throws when unavailable. */
+export async function fetchTranscriptSegments(
+    videoId: string
+): Promise<TranscriptSegment[]> {
+    const result = await getTranscript(videoId);
+    return result.segments.map((segment) => ({
+        text: segment.text,
+        offsetMs: segment.offsetMs,
+        durationMs: segment.durationMs,
+    }));
+}
+
 /**
- * Fetch the first 60 seconds (approx 1000 chars) of a video's transcript.
- * Spawns a Python process to use the robust `youtube_transcript_api`.
+ * Fetch a short intro window (~first 60s) of a video's transcript.
+ * Used by the get-video Sentinel to ground LLM judging. Never triggers ASR.
  */
 export async function fetchIntroTranscript(videoId: string): Promise<TranscriptSnippet> {
     try {
-        // Path to the python script
-        const scriptPath = path.join(process.cwd(), "src", "utils", "scripts", "fetch_transcript.py");
-
-        // Execute python script
-        // Note: Assumes 'python' is in PATH. In some envs it might be 'python3'.
-        const { stdout } = await execPromise(`python "${scriptPath}" ${videoId}`);
-
-        const result = JSON.parse(stdout.trim());
-
-        if (result.error) {
-            // console.warn(`⚠️ Transcript Error (${videoId}):`, result.error);
-            return { videoId, text: "", isAvailable: false };
+        const transcript = await getTranscript(videoId, { introOnly: true });
+        let text = "";
+        const sixtySecondsMs = 60_000;
+        for (const segment of transcript.segments) {
+            if (segment.offsetMs > sixtySecondsMs) break;
+            text += `${segment.text} `;
+            if (text.length > 1000) break;
         }
-
+        const trimmed = text.trim();
         return {
-            videoId: result.videoId,
-            text: result.text || "",
-            isAvailable: result.isAvailable || false
+            videoId,
+            text: trimmed,
+            isAvailable: trimmed.length > 0,
         };
-
-    } catch (error) {
-        // Python missing or script failure
-        // console.error("❌ Transcript Bridge Error:", error);
+    } catch {
+        // Captions disabled, region-blocked, network failure — honest empty.
         return { videoId, text: "", isAvailable: false };
     }
 }
 
 /**
- * Batch fetch intros for multiple videos (Parallel)
+ * Batch-fetch intros for multiple videos (parallel, rate-limit safe).
+ * Returns only videos that actually produced usable text.
  */
 export async function fetchIntroTranscripts(videoIds: string[]): Promise<Map<string, string>> {
+    const snippets = await mapWithConcurrency(videoIds, 4, (id) => fetchIntroTranscript(id));
+
     const results = new Map<string, string>();
-
-    // Run in parallel
-    const promises = videoIds.map(id => fetchIntroTranscript(id));
-    const snippets = await Promise.all(promises);
-
-    snippets.forEach(snippet => {
+    snippets.forEach((snippet) => {
         if (snippet.isAvailable && snippet.text.length > 0) {
             results.set(snippet.videoId, snippet.text);
         }
     });
 
     if (results.size > 0) {
-        console.log(`👂 Peaked at transcripts for ${results.size} candidates (via Python).`);
+        console.log(`👂 Peaked at transcripts for ${results.size}/${videoIds.length} candidates.`);
     }
 
     return results;
 }
+
+export { TranscriptUnavailableError };

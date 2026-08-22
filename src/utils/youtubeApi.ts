@@ -33,7 +33,11 @@ type FallbackYtVideo = {
   thumbnail?: string;
 };
 
-function isoDurationToSeconds(duration: string): number {
+/**
+ * Parse an ISO-8601 duration (e.g. PT1H2M30S) into seconds.
+ * Single shared parser — also used by the video-beats route.
+ */
+export function parseIsoDurationToSeconds(duration: string): number {
   const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!match) return 0;
 
@@ -44,7 +48,8 @@ function isoDurationToSeconds(duration: string): number {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
-function secondsToTimestamp(totalSeconds: number): string {
+/** Human-readable duration (m:ss or h:mm:ss) from seconds. */
+export function secondsToTimestamp(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
@@ -199,7 +204,7 @@ export async function searchVideos(
       if (!id) continue;
 
       const duration = item.contentDetails?.duration || "PT0S";
-      const seconds = isoDurationToSeconds(duration);
+      const seconds = parseIsoDurationToSeconds(duration);
       const views = Number(item.statistics?.viewCount || 0);
 
       detailsMap.set(id, {

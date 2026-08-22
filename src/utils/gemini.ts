@@ -25,7 +25,7 @@ const SECONDARY_MODEL = "gemini-2.5-flash-lite";
 // KEY POOL MANAGEMENT
 // ═══════════════════════════════════════════════════════════════
 
-function getApiKeys(): string[] {
+export function getApiKeys(): string[] {
     const keys: string[] = [];
 
     // Primary key
@@ -40,6 +40,11 @@ function getApiKeys(): string[] {
     }
 
     return keys;
+}
+
+/** True when at least one Gemini key (GEMINI_API_KEY or _2.._10) is configured. */
+export function hasAnyApiKey(): boolean {
+    return getApiKeys().length > 0;
 }
 
 // Round-robin counter — persists across requests in the same server process

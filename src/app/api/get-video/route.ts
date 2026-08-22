@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { searchVideos } from "@/utils/youtubeApi";
+import { searchVideos, secondsToTimestamp } from "@/utils/youtubeApi";
 import type { LearningTopology } from "@/utils/topologyInference";
+import { VideoCandidate } from "@/utils/searchScraper";
+import { isAbsurdMismatch } from "@/lib/brain/scoring/rubric";
 import {
-  VideoCandidate,
-  rankByDensity,
-  prepareForLLMRerank,
-  filterByDuration,
-} from "@/utils/searchScraper";
-import { vibeCheckRerank } from "@/utils/geminiReranker";
+  judgeCandidates,
+  SELECTION_THRESHOLD,
+  type MergedScore,
+} from "@/lib/brain/scoring/judge";
 import {
   checkVideoVault,
   storeInVideoVault,
@@ -27,7 +27,6 @@ import { normalizeVideoSpec, bandToApiDuration, VideoSpec } from "@/utils/videoS
 // ═══════════════════════════════════════════════════════════════
 const CONFIG = {
   INITIAL_FETCH_COUNT: 10,
-  RERANK_CANDIDATE_COUNT: 5,
   MIN_VIDEO_DURATION: 120,      // 2 minutes minimum
   MAX_VIDEO_DURATION: 7200,     // 2 hours max
   FALLBACK_VIDEO_ID: "",
@@ -62,19 +61,33 @@ function toVideoCandidates(videos: any[], count: number): VideoCandidate[] {
 
 // Top candidates by relevance score BEFORE any duration filtering — used for
 // honest "no_good_match" reporting when the duration spec empties the pool.
-function buildBestCandidates(candidates: VideoCandidate[], subjects: string[]) {
-  return toVideoCandidates(candidates, candidates.length)
-    .map((v) => ({
-      videoId: v.videoId,
-      title: v.title,
-      channel: v.author.name,
-      duration: v.duration.timestamp,
-      relevanceScore:
-        subjects.length > 0
-          ? checkRelevance(v.title, v.description, subjects, CONFIG.RELEVANCE_THRESHOLD).score
-          : 0,
-    }))
-    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+// When judged scores are available they are merged in; otherwise callers fall
+// back to relevanceScore alone.
+function buildBestCandidates(
+  candidates: VideoCandidate[],
+  subjects: string[],
+  scoredById?: Map<string, MergedScore>
+) {
+  return candidates
+    .map((c) => {
+      const judged = scoredById?.get(c.videoId);
+      return {
+        videoId: c.videoId,
+        title: c.title,
+        channel: c.author.name,
+        duration: secondsToTimestamp(Math.round(c.duration.seconds)),
+        relevanceScore:
+          subjects.length > 0
+            ? checkRelevance(c.title, c.description, subjects, CONFIG.RELEVANCE_THRESHOLD).score
+            : 0,
+        score: judged?.finalScore ?? null,
+        reason: judged?.reason ?? "",
+      };
+    })
+    .sort(
+      (a, b) =>
+        (b.score ?? b.relevanceScore) - (a.score ?? a.relevanceScore)
+    )
     .slice(0, 5);
 }
 
@@ -92,6 +105,11 @@ export async function GET(request: Request) {
   const playlistRef = searchParams.get("playlistRef");
   const excludeIdsParam = searchParams.get("excludeIds");
   const excludeIds = excludeIdsParam ? excludeIdsParam.split(",") : [];
+  const chapterTitle = searchParams.get("chapterTitle") || undefined;
+  const siblingTitlesParam = searchParams.get("siblingTitles");
+  const siblingTitles = siblingTitlesParam
+    ? siblingTitlesParam.split(",").map((s) => s.trim()).filter(Boolean)
+    : undefined;
   let topology: LearningTopology | undefined;
 
   const topologyParam = searchParams.get("topology");
@@ -150,9 +168,12 @@ export async function GET(request: Request) {
     });
   }
 
+  // Chapter context hash — prevents cross-chapter cache/vault collisions where
+  // the same search phrase appears in different roadmap positions.
+  const contextHash = [chapterTitle || "", (siblingTitles || []).join("|")].join("::");
   const cacheKey = `${query}|${modifier}|${userRole}|${experience}|${preferredChannel || "none"}|${
     spec ? `${spec.targetDurationBand}:${effectiveMinDuration}` : "nospec"
-  }`;
+  }|${contextHash}`;
 
   // ═══════════════════════════════════════════════════════════════
   // STEP 1: Check Quick Cache
@@ -177,7 +198,7 @@ export async function GET(request: Request) {
   // STEP 2: Check Video Vault (Supabase)
   // ═══════════════════════════════════════════════════════════════
   try {
-    const vaultResult = await checkVideoVault(query, userRole, experience);
+    const vaultResult = await checkVideoVault(query, userRole, experience, contextHash);
 
     // Check if the vault result is in the excluded list
     const isExcluded = vaultResult.entry && excludeIds.includes(vaultResult.entry.video_id);
@@ -467,111 +488,140 @@ export async function GET(request: Request) {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // STEP 7: Duration filter + Density scoring
+    // STEP 7: SOFT DURATION GATE (absurd mismatches only)
+    // The old hard 120s–7200s filter (and its self-erasing revert) is gone.
+    // Everything except >3x-window outliers flows into soft scoring.
+    // Legacy callers WITHOUT a spec bypass the gate entirely — the
+    // always-return-video contract must hold for them.
     // ═══════════════════════════════════════════════════════════════
-    let filteredCandidates = filterByDuration(relevantCandidates, effectiveMinDuration);
-    if (modifier !== "detailed") {
-      filteredCandidates = filteredCandidates.filter(
-        (v) => v.duration.seconds <= CONFIG.MAX_VIDEO_DURATION
-      );
-    }
+    const contextAwareTopic = previousTopic
+      ? `${query} (User previously learned: ${previousTopic})`
+      : query;
 
-    // Honest empty state: never revert to off-spec candidates. If nothing in the
-    // relevant pool satisfies the duration window, report it instead of picking.
-    if (filteredCandidates.length === 0) {
+    const maxCapSeconds = modifier === "detailed" ? Number.POSITIVE_INFINITY : CONFIG.MAX_VIDEO_DURATION;
+    const poolCandidates = spec
+      ? relevantCandidates.filter(
+          (v) => !isAbsurdMismatch(v, spec, maxCapSeconds)
+        )
+      : relevantCandidates;
+
+    if (poolCandidates.length === 0) {
       console.warn(
-        `⏱️ No match within duration window [${effectiveMinDuration}s${
-          modifier === "detailed" ? "" : `–${CONFIG.MAX_VIDEO_DURATION}s`
-        }] for "${query.slice(0, 40)}..." — reporting no_good_match.`
+        `⏱️ All ${relevantCandidates.length} relevant candidate(s) are absurd duration mismatches for "${query.slice(0, 40)}..." — reporting no_good_match.`
       );
+      // Judge the full relevant pool so bestCandidates carries real scores;
+      // on total judging failure we fall back to relevanceScore alone.
+      let scoredById: Map<string, MergedScore> | undefined;
+      try {
+        const judgeResult = await judgeCandidates({
+          candidates: relevantCandidates,
+          topic: contextAwareTopic,
+          userRole,
+          experienceLevel: experience,
+          spec,
+          context: { chapterTitle, siblingTitles },
+        });
+        scoredById = new Map(judgeResult.ranked.map((v) => [v.videoId, v]));
+      } catch (err) {
+        console.warn("⚠️ Judging for no_good_match report failed:", err);
+      }
       return NextResponse.json({
         status: "no_good_match",
         reason:
-          `${relevantCandidates.length} relevant candidate(s) found, but none met the required ` +
-          `duration window (${Math.round(effectiveMinDuration / 60)} min minimum${
-            modifier === "detailed" ? "" : `, max ${Math.round(CONFIG.MAX_VIDEO_DURATION / 60)} min`
-          }).`,
+          `${relevantCandidates.length} relevant candidate(s) found, but every one is a >3x ` +
+          `duration mismatch vs the target window (${Math.round(effectiveMinDuration / 60)} min minimum).`,
         videos: [],
-        bestCandidates: buildBestCandidates(relevantCandidates, smartQuery.subjects),
+        bestCandidates: buildBestCandidates(
+          relevantCandidates,
+          smartQuery.subjects,
+          scoredById
+        ),
         query,
         ...(specIgnored ? { specIgnored: true } : {}),
       });
     }
 
-    const rankedCandidates = rankByDensity(filteredCandidates);
-
-    console.log(`📊 Top ${Math.min(5, rankedCandidates.length)} by Density Score:`);
-    rankedCandidates.slice(0, 5).forEach((v, i) => {
-      console.log(`  ${i + 1}. [${v.densityScore}] ${v.title.slice(0, 50)}... (${v.densityFlags?.join(", ")})`);
+    // ═══════════════════════════════════════════════════════════════
+    // STEP 8: 🧑‍⚖️ SCORED JUDGE (rubric signals + LLM semantic scores)
+    // Returns {videoId,score,reason}[] — never a winner-only pick.
+    // ═══════════════════════════════════════════════════════════════
+    const judgeResult = await judgeCandidates({
+      candidates: poolCandidates,
+      topic: contextAwareTopic,
+      userRole,
+      experienceLevel: experience,
+      spec,
+      context: { chapterTitle, siblingTitles },
     });
 
-    // ═══════════════════════════════════════════════════════════════
-    // STEP 8: Gemini Vibe-Check Reranker (AI only sees RELEVANT videos)
-    // ═══════════════════════════════════════════════════════════════
-    let selectedVideo: VideoCandidate | undefined;
-    let selectionSource = "density_heuristic";
+    const rankedByScore: MergedScore[] = judgeResult.ranked;
+    const candidateById = new Map(poolCandidates.map((c) => [c.videoId, c]));
 
-    if (playlistRef && rankedCandidates.length > 0) {
-      selectedVideo = rankedCandidates.find(v => v.videoId === playlistRef) || rankedCandidates[0];
+    const top = rankedByScore[0];
+    let selectedVideo: VideoCandidate | undefined;
+    let selectionSource = "scored_judge";
+    let belowThreshold = false;
+
+    if (playlistRef && rankedByScore.some((v) => v.videoId === playlistRef)) {
+      if (top) {
+        selectedVideo = candidateById.get(playlistRef);
+      }
       selectionSource = "playlist_match";
       console.log(`🎬 Selected pre-computed playlist video: ${selectedVideo?.title}`);
+    } else if (!top) {
+      selectedVideo = undefined;
+    } else if (top.finalScore >= SELECTION_THRESHOLD || !spec) {
+      // Threshold gating applies to spec-aware calls; legacy callers without a
+      // spec keep the always-return-video contract and take the top-ranked.
+      selectedVideo = candidateById.get(top.videoId);
+      console.log(
+        `🧠 Judge picked [${top.finalScore}] ${selectedVideo?.title.slice(0, 50)}... (llm=${top.llmScore ?? "n/a"}, usedLLM=${judgeResult.usedLLM})`
+      );
     } else {
-      const topCandidates = rankedCandidates.slice(0, CONFIG.RERANK_CANDIDATE_COUNT);
-      const candidatesForLLM = prepareForLLMRerank(topCandidates);
-
-      const contextAwareTopic = previousTopic
-        ? `${query} (User previously learned: ${previousTopic})`
-        : query;
-
-      const rerankerResult = await vibeCheckRerank({
-        candidates: candidatesForLLM,
-        userRole,
-        topic: contextAwareTopic,
-        experienceLevel: experience,
-      });
-
-      if (!rerankerResult.fallbackUsed && rerankerResult.winnerId) {
-        selectedVideo = topCandidates.find((v) => v.videoId === rerankerResult.winnerId);
-        if (selectedVideo) {
-          selectionSource = "gemini_rerank";
-          console.log(`🧠 Gemini selected: ${selectedVideo.title.slice(0, 50)}...`);
-        }
-      }
-
-      if (!selectedVideo) {
-        selectedVideo = topCandidates.find((v) =>
-          v.description.toLowerCase().includes("github.com")
-        );
-        if (selectedVideo) selectionSource = "github_fallback";
-        else {
-          selectedVideo = topCandidates[0];
-          selectionSource = "density_fallback";
-        }
-      }
+      belowThreshold = true;
     }
 
     if (!selectedVideo) {
-      if (candidates.length > 0) {
-        selectedVideo = candidates[0];
-        selectionSource = "first_result_fallback";
-      } else {
-        return NextResponse.json({
-          videos: [{ videoId: "", title: "", channel: "", duration: "", reason: "No videos found for this topic", isPick: false }],
-          source: "no_results"
-        });
-      }
+      // Honest scored empty state — carries the judged order for UI messaging.
+      console.warn(
+        `🚫 No candidate cleared SELECTION_THRESHOLD=${SELECTION_THRESHOLD} for "${query.slice(0, 40)}..."${belowThreshold ? ` (best=${top?.finalScore})` : ""}`
+      );
+      return NextResponse.json({
+        status: "no_good_match",
+        reason:
+          `${poolCandidates.length} candidate(s) scored, but none reached the quality threshold (${SELECTION_THRESHOLD}/100).` +
+          (belowThreshold ? ` Best score was ${top?.finalScore}.` : ""),
+        videos: [],
+        bestCandidates: rankedByScore.slice(0, 5).map((v) => ({
+          videoId: v.videoId,
+          title: candidateById.get(v.videoId)?.title ?? "",
+          channel: candidateById.get(v.videoId)?.author.name ?? "",
+          duration: candidateById.get(v.videoId)?.duration.timestamp ?? "0:00",
+          score: v.finalScore,
+          reason: v.reason,
+        })),
+        query,
+        ...(specIgnored ? { specIgnored: true } : {}),
+      });
     }
+
+    console.log(`📊 Top ${Math.min(5, rankedByScore.length)} by Judge Score:`);
+    rankedByScore.slice(0, 5).forEach((v, i) => {
+      console.log(`  ${i + 1}. [${v.finalScore}] ${candidateById.get(v.videoId)?.title.slice(0, 50)}... — ${v.reason}`);
+    });
 
     // ═══════════════════════════════════════════════════════════════
     // STEP 9: Store + Cache
     // ═══════════════════════════════════════════════════════════════
+    const winnerVerdict = rankedByScore.find((v) => v.videoId === selectedVideo.videoId);
+
     const vaultEntry: VideoVaultEntry = {
       video_id: selectedVideo.videoId,
       title: selectedVideo.title,
       description: selectedVideo.description,
-      transcript_snippet: "",
-      density_score: selectedVideo.densityScore || 0,
-      density_flags: selectedVideo.densityFlags || [],
+      transcript_snippet: selectedVideo.transcriptSnippet?.slice(0, 500) || "",
+      density_score: winnerVerdict?.finalScore || 0,
+      density_flags: winnerVerdict?.flags || [],
       metadata: {
         duration_seconds: selectedVideo.duration.seconds,
         author: selectedVideo.author.name,
@@ -583,7 +633,7 @@ export async function GET(request: Request) {
       },
     };
 
-    await storeInVideoVault(vaultEntry, query, userRole, experience);
+    await storeInVideoVault(vaultEntry, query, userRole, experience, contextHash);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const finalVideos: any[] = [];
@@ -593,20 +643,23 @@ export async function GET(request: Request) {
         title: selectedVideo.title,
         channel: selectedVideo.author.name,
         duration: selectedVideo.duration.timestamp,
-        reason: selectionSource === "gemini_rerank" ? "AI Pick - Best conceptual fit" : "Highest density match",
+        reason: winnerVerdict?.reason ?? "Top scored match",
+        score: winnerVerdict?.finalScore ?? 0,
         isPick: true
       });
     }
 
-    for (const cand of rankedCandidates) {
+    for (const verdict of rankedByScore) {
       if (finalVideos.length >= 3) break;
-      if (cand.videoId === selectedVideo?.videoId) continue;
+      const cand = candidateById.get(verdict.videoId);
+      if (!cand || cand.videoId === selectedVideo?.videoId) continue;
       finalVideos.push({
         videoId: cand.videoId,
         title: cand.title,
         channel: cand.author.name,
         duration: cand.duration.timestamp,
-        reason: cand.densityScore && cand.densityScore > 0 ? `Good alternative (Score: ${cand.densityScore})` : "Alternative option",
+        reason: verdict.reason,
+        score: verdict.finalScore,
         isPick: false
       });
     }
@@ -621,9 +674,10 @@ export async function GET(request: Request) {
       videos: finalVideos,
       source: selectionSource,
       debug: {
-        candidatesAnalyzed: rankedCandidates.length,
+        candidatesAnalyzed: rankedByScore.length,
         usedAnchorChannel: searchTierUsed === "anchor_channel",
         searchTier: searchTierUsed,
+        judgeUsedLLM: judgeResult.usedLLM,
       },
       ...(specIgnored ? { specIgnored: true } : {}),
     });
