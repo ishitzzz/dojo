@@ -14,6 +14,14 @@
 // { userId?, videoId required, chapterKey?, signal, value? }.
 // value is a free-form string on the server, so early-exit reports
 // encode droppedAtSec as "<pct>|droppedAtSec=<sec>".
+//
+// M7.1 Practice loop: after ENDED the end-card offers "Start practice
+// step", which fetches <platformUrl>/api/practice-plan, renders the
+// single step inside the end-card itself (fallback v1 — see handoff)
+// and POSTs completed / stalled / skipped to /api/practice-outcome.
+// The plan is also mirrored into chrome.storage.local
+// ("dojo_practice_plan") so the content/guide.js controller can arm
+// its capture-phase tracker on any tab it gets injected into.
 // ═══════════════════════════════════════════════════════════════
 
 const POLL_MS = 2000;
@@ -22,6 +30,7 @@ const YT_EMBED_ORIGIN = "https://www.youtube-nocookie.com";
 const DEFAULT_PLATFORM_URL = "http://localhost:3000";
 const MIN_REPORT_PCT = 5;
 const MAX_REPORT_PCT = 95;
+const PRACTICE_STALL_MS = 90000;
 
 const params = new URLSearchParams(location.search);
 
@@ -29,6 +38,7 @@ const session = {
   videoId: (params.get("videoId") || "").trim(),
   chapterKey: (params.get("chapterKey") || "").trim(),
   topic: (params.get("topic") || "").trim(),
+  chapterTitle: (params.get("chapterTitle") || "").trim(),
   nextHrefRaw: params.get("nextHref") || "",
   platformUrl: "",
   userId: "",
@@ -154,15 +164,22 @@ function createEmbed() {
 
 // ── Widget API bridge over postMessage ──────────────────────────
 
-function sendCommand(func) {
+function sendCommand(func, args) {
   try {
     els.iframe.contentWindow.postMessage(
-      JSON.stringify({ event: "command", func, args: [] }),
+      JSON.stringify({ event: "command", func, args: args || [] }),
       YT_EMBED_ORIGIN
     );
   } catch {
     /* iframe not ready yet */
   }
+}
+
+function sendEventSubscriptions() {
+  // Explicit subscriptions: don't rely on the widget auto-pushing
+  // onStateChange/onReady — without these, ENDED may never fire.
+  sendCommand("addEventListener", ["onStateChange"]);
+  sendCommand("addEventListener", ["onReady"]);
 }
 
 function sendListeningHandshake() {
@@ -206,6 +223,7 @@ function handleMessage(event) {
     case "onReady":
       if (!flags.playerReady) {
         flags.playerReady = true;
+        sendEventSubscriptions();
         sendCommand("getDuration");
         setStatus("Player connected.");
       }
@@ -213,6 +231,16 @@ function handleMessage(event) {
     case "onStateChange":
       if (msg.info === 0) handleEnded(); // ENDED
       break;
+    case "onError": {
+      // 101/150: embedder disallowed the video; others: playback failure.
+      const code = typeof msg.info === "number" ? msg.info : NaN;
+      const message =
+        code === 101 || code === 150
+          ? "Video unavailable (embedding disabled)"
+          : "Player error" + (Number.isFinite(code) ? " (code " + code + ")" : "");
+      setStatus(message, "err");
+      break;
+    }
     case "infoDelivery": {
       const info = msg.info;
       if (info && typeof info === "object") {
@@ -358,6 +386,17 @@ function showEndCard() {
     });
     els.endActions.appendChild(closeBtn);
   }
+
+  // M7.1: practice step launcher (fallback v1 renders in this card).
+  if (session.topic || session.chapterKey || session.chapterTitle) {
+    const practiceBtn = document.createElement("button");
+    practiceBtn.type = "button";
+    practiceBtn.className = "btn btn-plain";
+    practiceBtn.id = "practice-start-btn";
+    practiceBtn.textContent = "Start practice step";
+    practiceBtn.addEventListener("click", () => void startPracticeStep(practiceBtn));
+    els.endActions.appendChild(practiceBtn);
+  }
 }
 
 async function handleEnded() {
@@ -390,6 +429,140 @@ async function handleExitClick() {
       if (outcome !== "posted") setStatus("You can close this tab now.", "");
     }, 400);
   }, delay);
+}
+
+// ── M7.1 Practice step (closed loop) ────────────────────────────
+
+function practicePlanUrl() {
+  return session.platformUrl + "/api/practice-plan";
+}
+
+function practiceOutcomeUrl() {
+  return session.platformUrl + "/api/practice-outcome";
+}
+
+async function startPracticeStep(button) {
+  button.disabled = true;
+  setStatus("Fetching practice step…");
+
+  const chapterTitle = session.chapterTitle || session.chapterKey;
+  const query = new URLSearchParams();
+  if (session.topic) query.set("topic", session.topic);
+  if (chapterTitle) query.set("chapterTitle", chapterTitle);
+
+  let plan;
+  try {
+    const response = await fetch(practicePlanUrl() + "?" + query.toString());
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    plan = await response.json();
+    if (!plan || !plan.planId || !plan.step || !plan.step.instruction) {
+      throw new Error("unexpected payload");
+    }
+  } catch (err) {
+    setStatus(
+      "Practice plan failed: " + (err instanceof Error ? err.message : "error"),
+      "err"
+    );
+    button.disabled = false;
+    return;
+  }
+
+  // Mirror for the content/guide.js controller (capture-phase
+  // tracker flavor) — it arms wherever it gets injected next.
+  storageSet({
+    dojo_practice_plan: {
+      planId: plan.planId,
+      step: plan.step,
+      platformUrl: session.platformUrl,
+      userId: session.userId,
+      topic: session.topic,
+      chapterTitle,
+      storedAt: Date.now(),
+    },
+  });
+
+  renderPracticeCard(plan);
+  setStatus("Do the step in your own tool, then mark done.");
+}
+
+function renderPracticeCard(plan) {
+  const existing = document.getElementById("practice-card");
+  if (existing) existing.remove();
+
+  const box = document.createElement("div");
+  box.id = "practice-card";
+  box.style.cssText =
+    "display:flex;flex-direction:column;gap:6px;align-items:center;max-width:100%;" +
+    "max-height:100%;overflow:auto;background:#141b22;border:1px solid #2c3642;" +
+    "border-radius:8px;padding:10px;margin-top:8px;";
+
+  const label = document.createElement("span");
+  label.textContent = "Practice step";
+  label.style.cssText = "font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);";
+  box.appendChild(label);
+
+  const instruction = document.createElement("p");
+  instruction.id = "practice-instruction";
+  instruction.textContent = plan.step.instruction;
+  instruction.style.cssText =
+    "margin:0;font-size:13px;line-height:1.45;text-align:center;max-width:340px;";
+  box.appendChild(instruction);
+
+  if (plan.step.targetHint) {
+    const hint = document.createElement("span");
+    hint.textContent = "Where: " + plan.step.targetHint;
+    hint.style.cssText = "font-size:11px;color:var(--muted);";
+    box.appendChild(hint);
+  }
+
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:8px;margin-top:2px;";
+
+  const doneBtn = document.createElement("button");
+  doneBtn.type = "button";
+  doneBtn.className = "btn btn-primary";
+  doneBtn.id = "practice-done-btn";
+  doneBtn.textContent = "Mark done";
+
+  const skipBtn = document.createElement("button");
+  skipBtn.type = "button";
+  skipBtn.className = "btn btn-plain";
+  skipBtn.id = "practice-skip-btn";
+  skipBtn.textContent = "Skip";
+
+  row.append(doneBtn, skipBtn);
+  box.appendChild(row);
+  els.endCard.insertBefore(box, els.endActions);
+
+  let finished = false;
+  const finish = (outcome) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(stallTimer);
+    doneBtn.disabled = true;
+    skipBtn.disabled = true;
+    return rawPost(
+      practiceOutcomeUrl(),
+      { planId: plan.planId, outcome, userId: session.userId },
+      false
+    ).then((result) => {
+      if (result.ok) {
+        setStatus(`Practice ${outcome} ✓ saved`, "ok");
+        doneBtn.textContent = outcome === "completed" ? "Done ✓" : outcome === "stalled" ? "Timed out" : "Skipped";
+      } else {
+        setStatus("Outcome save failed: " + result.reason, "err");
+        doneBtn.disabled = false;
+        doneBtn.textContent = "Retry mark done";
+        doneBtn.addEventListener("click", () => finish(outcome), { once: true });
+      }
+    });
+  };
+
+  doneBtn.addEventListener("click", () => void finish("completed"));
+  skipBtn.addEventListener("click", () => void finish("skipped"));
+
+  // Same closed-loop contract as guide.js: silence means stalled.
+  const stallTimer = setTimeout(() => void finish("stalled"), PRACTICE_STALL_MS);
 }
 
 // ── Boot ────────────────────────────────────────────────────────

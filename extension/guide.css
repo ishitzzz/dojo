@@ -1,0 +1,111 @@
+/* ═══════════════════════════════════════════════════════════════
+   Dojo Companion — Practice guide card (M7.1)
+
+   Styles for the shadow-DOM step card pinned bottom-right, ported
+   from followme-extension/content/overlay.css (glass panel, pulse
+   dot, pill buttons). guide.js embeds the identical rules via its
+   GUIDE_CSS constant because a shadow root cannot import page-level
+   stylesheets — keep the two in sync when editing.
+   ═══════════════════════════════════════════════════════════════ */
+
+:host {
+  all: initial;
+}
+
+.card {
+  box-sizing: border-box;
+  margin: 0;
+  width: 100%;
+  background: rgba(15, 15, 17, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  color: #ededed;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  transform: translateY(20px) scale(0.96);
+  opacity: 0;
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+}
+
+.card.dojo-visible {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  flex-shrink: 0;
+}
+
+.title {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #a1a1aa;
+}
+
+.timer {
+  font-size: 11px;
+  color: #a1a1aa;
+  font-variant-numeric: tabular-nums;
+}
+
+.instruction {
+  margin: 0;
+  padding: 12px 14px 4px;
+  font-size: 13px;
+  color: #ededed;
+}
+
+.hint {
+  margin: 0;
+  padding: 0 14px 10px;
+  font-size: 11px;
+  color: #71717a;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px 12px;
+}
+
+.btn-done {
+  appearance: none;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #22c55e;
+  color: #052e14;
+}
+
+.btn-done:hover {
+  background: #16a34a;
+}
+
+.btn-done[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}

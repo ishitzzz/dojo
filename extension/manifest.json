@@ -3,7 +3,7 @@
   "name": "Dojo Companion",
   "version": "0.1.0",
   "description": "Distraction-free focus player for Learning Dojo lessons with watch-progress telemetry.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "scripting", "tabs"],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
