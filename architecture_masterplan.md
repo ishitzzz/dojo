@@ -85,6 +85,7 @@ discipline layer (cache-first routing, daily budgets), test suite, observability
 | A6 | Deep Research capability (8–9 specialists) | `deep_research` capability fans out bounded parallel sub-loops: **scout** (decompose question), **source-hunter** (web/docs), **video-scout** (Data API multi-query), **transcript-miner**, **resource-curator** (Scrapling allowlist), **critic** (fact-check/contradiction pass), **synthesizer** (merge findings), **outline-architect** (teaching order), **gap-analyzer** (what's missing → follow-up queries); streams THINKING/SOURCES/STAGE events per specialist; budget-capped rounds; result = cited brief + sources + gaps → optional auto-roadmap patch proposal | A5 |
 | A7 | Provider registry complete | ChatProvider interface done properly: Gemini + Groq adapters; key-pool failover absorbed as transport detail; per-capability model override (from persona/preset) | A2 |
 | A8 | Capability cutover waves | Wave 1: tutor_chat, architect (topology→research→skeleton→validate spine), examiner (**Feynman gate**: cannot advance until feynman_passed). Wave 2: nexus_curator (generate-nexus/expand-node → knowledge_nodes/node_edges tables finally used), roadmap_surgeon, conversation_guide; DELETE legacy routes (chat-companion, generate-roadmap, validate-feynman, generate-nexus, expand-node, roadmap-surgeon, conversation-guide) | A3–A5 |
+| A9 | Remote client session fabric (extension-as-endpoint) | capability runtime can ADDRESS external clients: a client registry (web UI, extension tabs, companion) keyed by session; duplex TurnEvent channel per client (SSE now, WS when duplex needed); **guidance sub-agents**: the brain spawns a dedicated GuideAgent loop bound to one extension tab — it holds a command vocabulary (EXECUTE_GUIDANCE steps, highlight, hint, navigate) and consumes that tab's STEP_OUTCOME/DOM-event stream; monitor semantics = same budget/forced-finish rules as any AgentLoop; this is the seam Phases B/D hang on | A2,A5 |
 Acceptance highlights: every AI touchpoint goes through /api/turn with a
 capability; persona switch changes tone AND voice; L1/L2/L3 each provably
 read/written; Feynman gate blocks module advance; deep_research produces a
@@ -115,32 +116,41 @@ two failed beats auto-surface at next session start.
 Acceptance: "explain kubernetes operators" yields a labeled architecture
 flowchart + sequence diagram, drawn scene-by-scene with zero dead time.
 
-### Phase D — Extension v2 (Wk 4–5)
+### Phase D — Extension v2: The Brain's Hands (Wk 4–5)
+> Design stance: the extension is NOT a telemetry sender — it is a remote
+> endpoint the brain operates through. FolloMe already proved the Side Panel +
+> guidance UX; the work is wiring it to Learning Dojo's brain via A9.
+
 | # | Feature | Ships | Blocked by |
 |---|---|---|---|
-| D1 | TurnEvent transport | extension ↔ brain over SSE/WS with session continuity; side panel chat = tutor_chat anywhere | A6 |
+| D1 | TurnEvent transport + client registration | extension registers as a brain client on connect (A9 fabric); duplex channel carries commands TO the tab and events FROM it; session continuity across tab reloads; **Side Panel = ported FolloMe panel** (guidance steps / chat / progress) re-skinned to dojo theme, wired to tutor_chat + live_guidance capabilities | A9 |
 | D2 | Watch-page mode | youtube.com content script strips feed/sidebar/comments, kills autoplay-next | — |
-| D3 | Practice Engine full port | FolloMe resolver stack (~1.5k LOC): buildSelector, ElementMatcher (+50 text/+30 type/+20 aria), RecoveryEngine tiers, DOMStabilityMonitor (weighted mutation threshold 30), SyncController version-checked pipelines, detectCanvasHeavy CDP Input.dispatchMouseEvent flip, pre/post-click dud detection + network-idle gating, UI-TARS vision grounding as last escalation; **PracticePlan anchor chain schema**: data-testid → aria-label → text-anchor → CSS path → region fingerprint; hint ladder (nudge → explain → show-me); authoring via vendored TipTour recorder.js (797 lines, record/replay); ~200-line EXECUTE_GUIDANCE controller; offscreen document for player events; works on figma/docs/arxiv adapters | A6 |
-| D4 | Research Copilot | arXiv/journal extractor (title/abstract/sections/figures), section-by-section walkthrough, highlights→platform notebook/memory | D1, A4 |
-| D5 | Resource sniffer (cat-catch lineage) | webRequest send/response pairing for PDFs/slides/datasets; WebVTT subtitle enumeration; MSE capture; segment downloader for link-rot archives → feeds find_resources | D1 |
-| D6 | Token auth + security pass | platform-issued tokens, strip telemetry monkey-patches, all_frames, event-driven MV3 lifecycle | A1, D1 |
-Acceptance: Figma practice step with ghost-cursor + drift recovery; arXiv paper
-walkthrough syncing notes to platform; a lecture page's PDF+slides auto-captured
-as resources.
+| D3 | Practice Engine full port | FolloMe resolver stack (~1.5k LOC): buildSelector, ElementMatcher (+50 text/+30 type/+20 aria), RecoveryEngine tiers, DOMStabilityMonitor (weighted mutation threshold 30), SyncController version-checked pipelines, detectCanvasHeavy CDP Input.dispatchMouseEvent flip, pre/post-click dud detection + network-idle gating, UI-TARS vision grounding as last escalation; **PracticePlan anchor chain schema**: data-testid → aria-label → text-anchor → CSS path → region fingerprint; hint ladder (nudge → explain → show-me); authoring via vendored TipTour recorder.js (797 lines, record/replay); ~200-line EXECUTE_GUIDANCE controller; offscreen document for player events; works on figma/docs/arxiv adapters | A9 |
+| D4 | Recorder agent (memory writer) | extension-resident agent capturing the learner's real action traces (clicks, inputs, navigation, dud-clicks) during managed sessions → normalized into L2 notebook entries ("user did X in Figma") + exemplar store for future guidance plans; explicit consent toggle; nothing recorded outside managed sessions | D1, A4 |
+| D5 | Live Guide agent (real-time helper) | brain-spawned GuideAgent bound to the active tab (A9): watches STEP_OUTCOME stream, drives overlay steps in real time, escalates hint ladder on stall, answers context-aware Side Panel questions ("what does this panel do?") with current page state injected from context-extractor; drift → re-resolve via RecoveryEngine without losing plan position | A9, D3 |
+| D6 | Research Copilot | arXiv/journal extractor (title/abstract/sections/figures), section-by-section walkthrough in Side Panel, highlights → L2 notebook sync | D1, A4 |
+| D7 | Resource sniffer (cat-catch lineage) | webRequest send/response pairing for PDFs/slides/datasets; WebVTT subtitle enumeration; MSE capture; segment downloader for link-rot archives → feeds find_resources; per-site rule format user-extensible | D1 |
+| D8 | Token auth + security pass | platform-issued tokens, strip telemetry monkey-patches, all_frames support, event-driven MV3 lifecycle (replace 500ms heartbeat), rotate/remove any ported keys | A1, D1 |
+Acceptance: Figma practice step with ghost-cursor + drift recovery driven by a
+live Guide agent; learner actions land in L2 memory as reusable traces; arXiv
+paper walkthrough syncing notes to the platform; a lecture page's PDF+slides
+auto-captured as resources.
 
-### Phase E — Personalization & Resources (Wk 5–6)
+### Phase E — Personalization & Resource Intelligence (Wk 5–6)
 | # | Feature | Ships | Blocked by |
 |---|---|---|---|
 | E1 | Learner profile | onboarding v2 (role/level/language/goals) → profile table → injected into query builder, judge, resources, personas | A1 |
-| E2 | Operator QueryBuilder | dual-artifact queries (operator string for scraper surfaces + strict params for Data API); anti-clickbait ops finally wired | — |
-| E3 | Learned weights | nightly SQL aggregation of video_feedback → channel authority map + query-strategy stats → rubric weight overrides | M4 data |
-| E4 | Roadmap self-healing | 👎×2 same module → flag; watch-completion → remedial chapter proposals via architect | E3, A6 |
-| E5 | Scrapling sidecar | python service (adaptive selectors, stealth fetchers) crawling curated allowlist (MDN, official docs, awesome-lists); Resource objects | E1 |
-| E6 | find_resources tool + semantic match | resources as first-class as videos; pgvector embeddings for title/concept match | E5, A1 |
-| E7 | Implicit signals | extension watch-% → rubric freshness/engagement weights; drop-off heatmaps | D5 |
+| E2 | Operator QueryBuilder | dual-artifact queries (operator string for scraper surfaces + strict params for Data API): "exact phrase", -excludes, intitle:, OR, before:/after:, playlist suffix for mastery; anti-clickbait ops finally wired | — |
+| E3 | Learned video weights | nightly SQL aggregation of video_feedback → channel authority map + query-strategy stats → rubric weight overrides | M4 data |
+| E4 | Roadmap self-healing | 👎×2 same module → flag; watch-completion + beat failures → remedial chapter proposals via architect | E3, A8 |
+| E5 | Multi-scraper resource engine | **Scrapling sidecar** (python: adaptive element fingerprints, stealth fetchers, Playwright rendering) + **cat-catch rule compatibility** (user-extensible {regex, ext} rules) + **domain recipe registry** (per-site extraction recipes for MDN/official docs/awesome-lists, fingerprinted card elements); output = normalized Resource objects (docs/repos/papers/interactive/courses) with liveness + content-type validation and dedupe/canonical ranking; extension sniffer results (D7) merge into the same pipeline; every resource carries a deep-link ("open in managed tab") so the platform POINTS to the right place | E1 |
+| E6 | Resource feedback loop (mirror of M4) | `resource_feedback` table (user_id, resource_id, domain, resource_type, signal like/dislike/bookmark/time_spent/completed, value, created_at); 👍/👎/bookmark UI on every Resource Hub card; dislike invalidates cached resource + records type/domain preference; POST API mirrors /api/feedback contract | A1 |
+| E7 | Resource personalization engine | aggregation of resource_feedback → per-learner TYPE weights (prefers docs over videos? interactive over papers?) + per-DOMAIN priors (MDN trusted, random blogs demoted) → feeds find_resources ranking AND Resource Hub ordering; learner profile (E1) filters language/level | E6, E1 |
+| E8 | find_resources tool + semantic match | resources as first-class as videos — a brain tool the loop can call mid-turn; pgvector embeddings (1536-dim column exists) for title/concept match; judge-style scored output {resourceId,score,reason}[] | E5, A5 |
 Acceptance: same topic, two different learners get different videos AND
-different resources; two 👎s trigger a module rebalance proposal.
-
+different resources ordered by their own learned preferences; disliking an
+"off-topic" blog post permanently reshapes that learner's future resource
+ranking; every recommended resource opens exactly where it should.
 ### Phase F — Hardening & Demo (Wk 6+, rolling)
 Auth-protected demo path E2E rewrite of docs/DEMO.md · error envelope
 standardization · quota dashboard + cache-first budget router · unit/integration
