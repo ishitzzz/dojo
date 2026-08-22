@@ -4,6 +4,9 @@ import YouTube from "react-youtube";
 import { motion, AnimatePresence } from "framer-motion";
 import GameArena from "./tools/GameArena";
 import AIChat from "./AIChat";
+import TutorChatDock from "./workspace/TutorChat";
+import BeatsPanel from "./workspace/BeatsPanel";
+import PracticeCard from "./workspace/PracticeCard";
 
 interface Chapter {
     chapterTitle: string;
@@ -251,6 +254,17 @@ function SkeletonCard() {
     );
 }
 
+/** Parses "1:02:03" / "12:34" / "48" duration labels into total seconds. */
+function parseDurationLabelToSeconds(label: string | null | undefined): number | undefined {
+    if (!label) return undefined;
+    const parts = label.trim().split(":").map((part) => Number(part));
+    if (parts.length === 0 || parts.length > 3 || parts.some((n) => !Number.isFinite(n) || n < 0)) {
+        return undefined;
+    }
+    const total = parts.reduce((acc, n) => acc * 60 + n, 0);
+    return total > 0 ? Math.round(total) : undefined;
+}
+
 export default function Workspace({
     module,
     onBack,
@@ -265,6 +279,7 @@ export default function Workspace({
     const [activeChapIdx, setActiveChapIdx] = useState(initialChapIdx || 0);
     const [completedChapIdxs, setCompletedChapIdxs] = useState<number[]>([]);
     const [companionTab, setCompanionTab] = useState<"context" | "chat" | "practice">("context");
+    const [tutorOpen, setTutorOpen] = useState(false);
 
     const [showFeynman, setShowFeynman] = useState(false);
     const [showCompletion, setShowCompletion] = useState(false);
@@ -280,6 +295,9 @@ export default function Workspace({
     const [videoOptions, setVideoOptions] = useState<any[]>([]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const [videoMeta, setVideoMeta] = useState<any>(null);
+    // Judge transparency: undefined/null = unknown (cache/vault responses
+    // carry no debug block); strict false renders the "rubric-only" tag.
+    const [judgeUsedLLM, setJudgeUsedLLM] = useState<boolean | null>(null);
 
     // M4.2 Real-time 👎 swap state
     const [swapLoading, setSwapLoading] = useState(false);
@@ -369,6 +387,7 @@ export default function Workspace({
             setLoadingVideo(true);
             setVideoId(null);
             setVideoMeta(null);
+            setJudgeUsedLLM(null);
             try {
                 const params = buildGetVideoParams({ excludeIds: seenVideoIds });
 
@@ -394,6 +413,9 @@ export default function Workspace({
                 }
 
                 if (isStale()) return;
+                if (typeof data.debug?.judgeUsedLLM === "boolean") {
+                    setJudgeUsedLLM(data.debug.judgeUsedLLM);
+                }
                 if (data.densityScore !== undefined) {
                     setVideoMeta({ densityScore: data.densityScore, densityFlags: data.densityFlags, source: data.source });
                 } else if (data.source) {
@@ -459,6 +481,14 @@ export default function Workspace({
         width: "100%",
         playerVars: { autoplay: 1, controls: 1, rel: 0 },
     };
+
+    // Duration of the currently playing video, parsed from the pick's
+    // "mm:ss"/"hh:mm:ss" label — beats eligibility fallback when the
+    // server has no YOUTUBE_API_KEY.
+    const currentOptionDuration = videoOptions.find(
+        (opt: { videoId: string }) => opt.videoId === videoId
+    )?.duration;
+    const beatsDurationSeconds = parseDurationLabelToSeconds(currentOptionDuration);
 
     // --- M4.2 Feedback helpers ---
     const REJECT_REASONS = ["too basic", "too advanced", "wrong duration", "off-topic"];
@@ -543,6 +573,10 @@ export default function Workspace({
                 onVideoSeen(pick.videoId);
             } else {
                 setFeedbackError("No better match found — keeping current video.");
+            }
+
+            if (!isStale() && typeof data.debug?.judgeUsedLLM === "boolean") {
+                setJudgeUsedLLM(data.debug.judgeUsedLLM);
             }
         } catch (e) {
             if (!isStale()) {
@@ -804,6 +838,7 @@ export default function Workspace({
                         {/* --- PRACTICE TAB --- */}
                         {companionTab === "practice" && (
                             <div className="p-4 overflow-y-auto h-full custom-scrollbar">
+                                <PracticeCard key={activeChapterTitle} topic={topic} chapterTitle={activeChapterTitle} />
                                 {loadingContent ? (
                                     <div className="space-y-3 mt-2">
                                         <SkeletonCard />
@@ -919,6 +954,22 @@ export default function Workspace({
 
                     {/* M4.2 Feedback controls */}
                     <div className="flex items-center gap-2 flex-wrap shrink-0">
+                        {activeChapterTitle && (
+                            <a
+                                href={`/whiteboard?topic=${encodeURIComponent(activeChapterTitle)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                title="Open a live AI whiteboard explanation of this chapter"
+                                className="text-xs px-3 py-1.5 rounded-lg active:scale-[0.97] resource-link-hover"
+                                style={{
+                                    background: "var(--accent-soft)",
+                                    color: "var(--accent)",
+                                    border: "1px solid transparent",
+                                }}
+                            >
+                                🧑‍🏫 Explain on whiteboard
+                            </a>
+                        )}
                         <div
                             className="flex items-center gap-1 rounded-lg px-1.5 py-1"
                             style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
@@ -1006,10 +1057,17 @@ export default function Workspace({
                         )}
                     </div>
 
+                    {/* M3.2 Beat timeline (renders only for long videos) */}
+                    <BeatsPanel
+                        videoId={videoId}
+                        durationSeconds={beatsDurationSeconds}
+                        topic={activeChapterTitle}
+                    />
+
                     {/* Video selector strip */}
                     {videoOptions.length > 1 && (
                         <div className="flex gap-3 overflow-x-auto shrink-0 custom-scrollbar">
-                            {videoOptions.map((opt: { videoId: string; title: string; channel: string; duration: string; reason: string; isPick: boolean }) => (
+                            {videoOptions.map((opt: { videoId: string; title: string; channel: string; duration: string; reason: string; score?: number; isPick: boolean }) => (
                                 <div
                                     key={opt.videoId}
                                     onClick={() => setVideoId(opt.videoId)}
@@ -1026,6 +1084,28 @@ export default function Workspace({
                                         </div>
                                         <div className="flex flex-col flex-1 min-w-0 justify-center">
                                             <div className="text-[11px] font-semibold truncate leading-tight" style={{ color: "var(--text-primary)" }}>{opt.title}</div>
+                                            {((typeof opt.score === "number" && opt.score > 0) || judgeUsedLLM === false) && (
+                                                <div className="flex items-center gap-1 mt-0.5">
+                                                    {(typeof opt.score === "number" && opt.score > 0) && (
+                                                        <span
+                                                            title={`Judge score: ${Math.round(opt.score)}/100`}
+                                                            className="font-mono text-[9px] font-semibold px-1.5 rounded-full leading-4"
+                                                            style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
+                                                        >
+                                                            {Math.round(opt.score)}
+                                                        </span>
+                                                    )}
+                                                    {judgeUsedLLM === false && (
+                                                        <span
+                                                            title="Scored by rubric only — LLM judge unavailable"
+                                                            className="text-[8px] uppercase tracking-wide px-1 rounded-full leading-4"
+                                                            style={{ color: "var(--text-muted)", border: "1px dashed var(--border)" }}
+                                                        >
+                                                            rubric-only
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
                                             <div className="text-[9px] truncate mt-0.5" style={{ color: "var(--text-muted)" }}>{opt.channel}</div>
                                             <div className="text-[9px] mt-0.5 line-clamp-1" style={{ color: "var(--text-muted)" }}>{opt.reason}</div>
                                         </div>
@@ -1059,6 +1139,12 @@ export default function Workspace({
                         </div>
                     </div>
                 </div>
+
+                {/* RIGHT-MOST: Tutor Chat dock (collapsible) */}
+                <TutorChatDock
+                    open={tutorOpen}
+                    onToggle={() => setTutorOpen((v) => !v)}
+                />
             </div>
 
             {/* Feynman Checkpoint */}

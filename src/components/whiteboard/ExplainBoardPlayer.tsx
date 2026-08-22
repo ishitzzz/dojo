@@ -52,8 +52,15 @@ function isAbort(error: unknown): boolean {
     return error instanceof Error && error.name === "AbortError";
 }
 
-export default function ExplainBoardPlayer() {
-    const [topic, setTopic] = useState("");
+interface ExplainBoardPlayerProps {
+    /** Seed for the topic input (e.g. ?topic= deep link). */
+    initialTopic?: string;
+}
+
+export default function ExplainBoardPlayer({
+    initialTopic = "",
+}: ExplainBoardPlayerProps) {
+    const [topic, setTopic] = useState(initialTopic);
     const [phase, setPhase] = useState<Phase>("idle");
     const [status, setStatus] = useState("");
     const [activeScene, setActiveScene] = useState<Scene | null>(null);
