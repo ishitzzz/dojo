@@ -23,6 +23,7 @@ import { fetchIntroTranscripts } from "@/utils/transcriptClient";
 import { normalizeVideoSpec, bandToApiDuration, VideoSpec } from "@/utils/videoSpec";
 import { getFreshCacheEntry, setCacheEntry } from "@/lib/feedback/videoCache";
 import { getRejections, isRejectedForChapter } from "@/lib/feedback/rejections";
+import { filterAliveVideoIds, isVideoAlive } from "@/utils/videoLiveness";
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -220,12 +221,27 @@ export async function GET(request: Request) {
   if (cached) {
     // Filter rejected/excluded videos out of the cached list BEFORE any
     // short-circuit — a cached pick whose id is rejected must not be served.
-    const usableVideos = (cached.videos || []).filter(
+    let usableVideos = (cached.videos || []).filter(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (v: any) => !isRejected(v?.videoId)
     );
-    const mainVideoId = cached.videos ? cached.videos[0].videoId : cached.videoId;
-    if (usableVideos.length > 0 && !isRejected(mainVideoId)) {
+    // Quota-free liveness gate: a cached entry must still exist on YouTube.
+    // oEmbed verdicts are memoized (24h TTL), so repeat hits cost nothing.
+    if (usableVideos.length > 0) {
+      const aliveIds = await filterAliveVideoIds(
+        usableVideos.flatMap((v: { videoId?: string }) =>
+          v?.videoId ? [v.videoId] : []
+        )
+      );
+      const beforeLiveness = usableVideos.length;
+      usableVideos = usableVideos.filter((v: { videoId?: string }) =>
+        aliveIds.has(String(v?.videoId))
+      );
+      if (usableVideos.length < beforeLiveness) {
+        console.log(`☠️ Quick cache liveness: dropped ${beforeLiveness - usableVideos.length}/${beforeLiveness} dead cached video(s).`);
+      }
+    }
+    if (usableVideos.length > 0) {
       console.log(`⚡ Quick cache hit for: "${query.slice(0, 30)}..."`);
       return NextResponse.json({
         videos: usableVideos,
@@ -234,7 +250,7 @@ export async function GET(request: Request) {
         ...(specIgnored ? { specIgnored: true } : {}),
       });
     } else {
-      console.log(`🚫 Quick cache hit BUT excluded: ${mainVideoId}`);
+      console.log(`🚫 Quick cache hit BUT excluded/dead: ${cached.videos ? cached.videos[0].videoId : cached.videoId} — falling through to search.`);
     }
   }
 
@@ -257,7 +273,17 @@ export async function GET(request: Request) {
         Number.isFinite(entryDurationSeconds) &&
         entryDurationSeconds >= searchMinDuration);
 
+    // Quota-free liveness gate: vaulted videos rot too. A dead vault id must
+    // fall through to the normal search pipeline, never be served.
+    let vaultAlive = true;
     if (vaultResult.found && vaultResult.entry && !isExcluded && meetsSpecFloor) {
+      vaultAlive = await isVideoAlive(vaultResult.entry.video_id);
+      if (!vaultAlive) {
+        console.log(`☠️ Vault liveness drop (oEmbed non-200): ${vaultResult.entry.video_id} — falling through to search.`);
+      }
+    }
+
+    if (vaultResult.found && vaultResult.entry && !isExcluded && meetsSpecFloor && vaultAlive) {
       console.log(`💾 Vault hit for: "${query.slice(0, 30)}..." -> ${vaultResult.entry.video_id}`);
       const entryVid = {
         videoId: vaultResult.entry.video_id,
@@ -698,6 +724,61 @@ export async function GET(request: Request) {
     });
 
     // ═══════════════════════════════════════════════════════════════
+    // STEP 8.5: ☠️ OEMBED LIVENESS GATE (quota-free, final defense)
+    // The Data API dead-video guard only runs when enrichment succeeds;
+    // when quota is exhausted, dead yt-search ids sail through to the
+    // player ("This video isn't available anymore"). The public oEmbed
+    // endpoint costs nothing and definitively answers alive/dead.
+    // Validate the pick AND its alternatives; if the pick is dead, the
+    // next ranked alive candidate is promoted, walking until the ranked
+    // list is exhausted.
+    // ═══════════════════════════════════════════════════════════════
+    const orderedIds = Array.from(
+      new Set([
+        ...(selectedVideo ? [selectedVideo.videoId] : []),
+        ...rankedByScore.map((v) => v.videoId),
+      ])
+    );
+    const aliveIds = await filterAliveVideoIds(orderedIds);
+    const droppedIds = orderedIds.filter((id) => !aliveIds.has(id));
+    if (droppedIds.length > 0) {
+      console.log(
+        `☠️ oEmbed liveness guard: dropped ${droppedIds.length}/${orderedIds.length} dead candidate(s): [${droppedIds.join(", ")}]`
+      );
+    }
+    const rankedAliveIds = orderedIds.filter((id) => aliveIds.has(id));
+
+    if (rankedAliveIds.length === 0) {
+      console.warn(
+        `☠️ oEmbed liveness guard: ALL ${orderedIds.length} ranked candidate(s) dead for "${query.slice(0, 40)}..." — reporting no_good_match.`
+      );
+      return NextResponse.json({
+        status: "no_good_match",
+        reason: `${orderedIds.length} ranked candidate(s) found, but every one failed the liveness check (dead/private/unavailable video).`,
+        videos: [],
+        bestCandidates: rankedByScore.slice(0, 5).map((v) => ({
+          videoId: v.videoId,
+          title: candidateById.get(v.videoId)?.title ?? "",
+          channel: candidateById.get(v.videoId)?.author.name ?? "",
+          duration: candidateById.get(v.videoId)?.duration.timestamp ?? "0:00",
+          score: v.finalScore,
+          reason: v.reason,
+        })),
+        query,
+        ...(specIgnored ? { specIgnored: true } : {}),
+      });
+    }
+
+    const finalPickId = rankedAliveIds[0];
+    if (selectedVideo && finalPickId !== selectedVideo.videoId) {
+      console.log(
+        `🎬 Pick was dead — promoted next ranked alive candidate: ${candidateById.get(finalPickId)?.title.slice(0, 50) ?? finalPickId}`
+      );
+    }
+    selectedVideo = candidateById.get(finalPickId) ?? selectedVideo;
+    const alternativeIds = rankedAliveIds.slice(1, 3);
+
+    // ═══════════════════════════════════════════════════════════════
     // STEP 9: Store + Cache
     // ═══════════════════════════════════════════════════════════════
     const winnerVerdict = rankedByScore.find((v) => v.videoId === selectedVideo.videoId);
@@ -736,17 +817,18 @@ export async function GET(request: Request) {
       });
     }
 
-    for (const verdict of rankedByScore) {
-      if (finalVideos.length >= 3) break;
-      const cand = candidateById.get(verdict.videoId);
+    // Alternatives are drawn from the oEmbed-verified alive set only.
+    for (const altId of alternativeIds) {
+      const cand = candidateById.get(altId);
       if (!cand || cand.videoId === selectedVideo?.videoId) continue;
+      const verdict = rankedByScore.find((v) => v.videoId === altId);
       finalVideos.push({
         videoId: cand.videoId,
         title: cand.title,
         channel: cand.author.name,
         duration: cand.duration.timestamp,
-        reason: verdict.reason,
-        score: verdict.finalScore,
+        reason: verdict?.reason ?? "",
+        score: verdict?.finalScore ?? 0,
         isPick: false
       });
     }

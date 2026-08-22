@@ -8,13 +8,35 @@ import {
   LOGICAL_WIDTH,
 } from "@/lib/whiteboard/canvasInterceptor";
 import { applyHumanKinematics } from "@/lib/whiteboard/kinematicEngine";
+import {
+  CLEAR_DWELL_SECONDS,
+  MAX_SCENE_SECONDS,
+  MIN_SCENE_SECONDS,
+  RENDER_FPS,
+  TEXT_DWELL_SECONDS,
+} from "@/lib/whiteboard/pacing";
 
 interface WhiteboardRendererProps {
   scenes: Scene[];
   /** Playback pacing multiplier (1 = natural hand speed). Changes apply live. */
   speed?: number;
+  /**
+   * UX defect #1b: per-scene target duration in seconds (parallel to
+   * `scenes`). Each scene scales its kinematics speed so its strokes
+   * spread across clamp(hint, MIN_SCENE_SECONDS, MAX_SCENE_SECONDS);
+   * any remainder after slowing becomes an end-of-scene hold on the
+   * finished board. Absent hints fall back to an internal estimate.
+   */
+  durationHints?: number[];
   /** True pause barrier: freezes advancement and suppresses onSceneDone. */
   paused?: boolean;
+  /**
+   * When provided, replaces the internally computed "scene k / N" badge.
+   * The player knows the FULL streamed total (from RESULT metadata) while
+   * this component only sees the single active scene — without the
+   * override it would wrongly display "scene 1 / 1".
+   */
+  sceneLabelOverride?: string;
   /** Fired when a scene finishes drawing (0-based index). */
   onSceneDone?: (index: number) => void;
   /** Fired once after the final scene completes. */
@@ -41,6 +63,12 @@ interface CompiledScene {
   title: string;
   narration: string;
   stages: CompiledStage[];
+  /**
+   * End-of-scene hold (frames) guaranteeing the scene occupies its full
+   * target window even when the kinematic floor (speed 0.1) can't stretch
+   * sparse strokes far enough on their own.
+   */
+  holdFrames: number;
 }
 
 interface AnimState {
@@ -56,6 +84,12 @@ interface AnimState {
   cursorX: number;
   cursorY: number;
   cursorVisible: boolean;
+  // Pacing barriers: per-command text/erase/clear dwell and the
+  // end-of-scene hold, both consumed one frame per tick.
+  dwellFramesRemaining: number;
+  holdFramesRemaining: number;
+  // Guards the end-of-scene hold against re-arming every frame.
+  sceneHoldDone: boolean;
 }
 
 function createAnimState(): AnimState {
@@ -70,6 +104,9 @@ function createAnimState(): AnimState {
     cursorX: 0,
     cursorY: 0,
     cursorVisible: false,
+    dwellFramesRemaining: 0,
+    holdFramesRemaining: 0,
+    sceneHoldDone: false,
   };
 }
 
@@ -78,7 +115,9 @@ const BOARD_BG = "#1e1e1e";
 export default function WhiteboardRenderer({
   scenes,
   speed = 1,
+  durationHints,
   paused = false,
+  sceneLabelOverride,
   onSceneDone,
   onComplete,
 }: WhiteboardRendererProps) {
@@ -99,26 +138,104 @@ export default function WhiteboardRenderer({
     pausedRef.current = paused;
   });
 
-  // Recompiled when scenes OR speed change; animation indexes survive speed
-  // changes because compilation preserves stage/point structure.
+  // Recompiled when scenes OR speed OR durationHints change; animation
+  // indexes survive speed changes because compilation preserves
+  // stage/point structure.
+  //
+  // ── Per-scene duration math (UX defect #1b) ──────────────────────
+  // 1. Kinematize every stroke at BASE speed 1 and measure its natural
+  //    frame cost: the anim loop consumes `velocity` progress-units per
+  //    frame and advances one point per full unit, so a point with
+  //    velocity v costs 1/v frames. Summing 1/v over all non-zero
+  //    velocity points gives exact natural stroke frames (the renderer's
+  //    velocity scales linearly with the kinematic speed multiplier).
+  // 2. Add per-command dwell: text stages hold TEXT_DWELL_SECONDS each,
+  //    erase/clear hold CLEAR_DWELL_SECONDS (see pacing.ts).
+  // 3. Target = clamp(durationHint ?? naturalSeconds, 7, 25) so every
+  //    scene plays ≥7s and ≤~25s.
+  // 4. Speed factor = naturalStrokeSeconds / (target − dwellSeconds):
+  //    sparse scenes get factor < 1 (slow motion), dense ones > 1.
+  //    Effective kinematic speed clamps to the engine range [0.1, 10].
+  // 5. Whatever the floor clipping leaves of the window becomes
+  //    holdFrames — the finished board lingers before onSceneDone.
   const compiledScenes = useMemo<CompiledScene[]>(
     () =>
-      scenes.map((scene) => ({
-        title: scene.title,
-        narration: scene.narration,
-        stages: compileDrawCommands(scene.drawCommands).map(
-          (stage): CompiledStage =>
+      scenes.map((scene, sceneIdx) => {
+        const stages = compileDrawCommands(scene.drawCommands);
+
+        let strokeFramesBase = 0;
+        let dwellSeconds = 0;
+        const measured: CompiledStage[] = stages.map((stage) => {
+          if (stage.kind === "stroke") {
+            const points = applyHumanKinematics(stage.points, { speed: 1 });
+            for (let i = 1; i < points.length; i++) {
+              if (points[i].velocity > 0) strokeFramesBase += 1 / points[i].velocity;
+            }
+            return {
+              kind: "stroke",
+              color: stage.color,
+              width: stage.width,
+              points,
+            };
+          }
+          dwellSeconds +=
+            stage.kind === "text" ? TEXT_DWELL_SECONDS : CLEAR_DWELL_SECONDS;
+          return stage;
+        });
+
+        const strokeSecondsBase = strokeFramesBase / RENDER_FPS;
+        const naturalSeconds = strokeSecondsBase + dwellSeconds;
+        const hint = durationHints?.[sceneIdx];
+        const targetSeconds = Math.min(
+          MAX_SCENE_SECONDS,
+          Math.max(MIN_SCENE_SECONDS, hint ?? naturalSeconds)
+        );
+
+        // Spread strokes across the window minus dwell time; clamp the
+        // resulting speed into the kinematic engine's supported range.
+        const strokeTargetSeconds = Math.max(
+          0.25,
+          targetSeconds - dwellSeconds
+        );
+        const factor = strokeSecondsBase / strokeTargetSeconds;
+        const effectiveSpeed = Math.min(
+          10,
+          Math.max(0.1, speed * (Number.isFinite(factor) ? factor : 1))
+        );
+        const predictedStrokeSeconds =
+          speed > 0 ? strokeSecondsBase * (speed / effectiveSpeed) : strokeSecondsBase;
+        const holdFrames = Math.max(
+          0,
+          Math.round(
+            (targetSeconds - predictedStrokeSeconds - dwellSeconds) * RENDER_FPS
+          )
+        );
+
+        return {
+          title: scene.title,
+          narration: scene.narration,
+          holdFrames,
+          stages: measured.map((stage): CompiledStage =>
             stage.kind === "stroke"
               ? {
                   kind: "stroke",
                   color: stage.color,
                   width: stage.width,
-                  points: applyHumanKinematics(stage.points, { speed }),
+                  // Velocity scales exactly linearly with the kinematic
+                  // speed multiplier (multiplied after pressure mapping),
+                  // so rescaling the base-speed measurement reproduces
+                  // applyHumanKinematics({ speed: effectiveSpeed }) without
+                  // a second pass.
+                  points: stage.points.map((p) => ({
+                    ...p,
+                    velocity: p.velocity * effectiveSpeed,
+                  })),
                 }
               : stage
-        ),
-      })),
-    [scenes, speed]
+          ),
+        };
+      }),
+    [scenes, speed, durationHints]
   );
 
   // Reset UI state during render when the scene list identity changes
@@ -286,14 +403,34 @@ export default function WhiteboardRenderer({
     const advance = () => {
       const anim = animRef.current;
       while (!anim.finished) {
+        // Pacing barriers (UX defect #1b): text/erase/clear dwell and the
+        // end-of-scene hold each consume one frame per tick, freezing
+        // advancement while the board keeps repainting.
+        if (anim.dwellFramesRemaining > 0) {
+          anim.dwellFramesRemaining -= 1;
+          break;
+        }
+        if (anim.holdFramesRemaining > 0) {
+          anim.holdFramesRemaining -= 1;
+          break;
+        }
         if (anim.sceneIdx >= compiledScenes.length) {
           finish();
           return;
         }
         const scene = compiledScenes[anim.sceneIdx];
 
-        // Scene exhausted -> report completion and start the next on a fresh board
+        // Scene exhausted -> report completion and start the next on a fresh
+        // board. First serve the scene's hold window so sparse scenes still
+        // occupy their full target duration.
         if (anim.stageIdx >= scene.stages.length) {
+          // Arm once per scene (sceneHoldDone prevents infinite re-arm
+          // while the counter drains at the barrier above).
+          if (!anim.sceneHoldDone && scene.holdFrames > 0) {
+            anim.sceneHoldDone = true;
+            anim.holdFramesRemaining = scene.holdFrames;
+            break;
+          }
           onSceneDoneRef.current?.(anim.sceneIdx);
           anim.sceneIdx += 1;
           anim.stageIdx = 0;
@@ -301,13 +438,16 @@ export default function WhiteboardRenderer({
           anim.drawnIdx = 1;
           anim.progress = 0;
           anim.committed = [];
+          anim.sceneHoldDone = false;
           setUiSceneIdx(Math.min(anim.sceneIdx, compiledScenes.length - 1));
           continue;
         }
 
         const stage = scene.stages[anim.stageIdx];
 
-        // Discrete stages (text/erase/clear) apply instantaneously
+        // Discrete stages (text/erase/clear) commit immediately, then dwell:
+        // text lingers so viewers can read it (~1.2s each), erase/clear get
+        // a shorter beat so transitions don't strobe.
         if (stage.kind !== "stroke") {
           if (stage.kind === "clear") {
             anim.committed = [];
@@ -318,7 +458,11 @@ export default function WhiteboardRenderer({
           anim.pointIdx = 1;
           anim.drawnIdx = 1;
           anim.progress = 0;
-          continue;
+          anim.dwellFramesRemaining = Math.round(
+            (stage.kind === "text" ? TEXT_DWELL_SECONDS : CLEAR_DWELL_SECONDS) *
+              RENDER_FPS
+          );
+          break;
         }
 
         const pts = stage.points;
@@ -413,9 +557,10 @@ export default function WhiteboardRenderer({
                 {activeScene.title}
               </h3>
               <span className="shrink-0 text-xs text-neutral-500">
-                {uiDone
-                  ? "complete"
-                  : `scene ${activeIdx + 1} / ${totalScenes}`}
+                {sceneLabelOverride ??
+                  (uiDone
+                    ? "complete"
+                    : `scene ${activeIdx + 1} / ${totalScenes}`)}
               </span>
             </div>
             <p className="mt-1 text-sm leading-relaxed text-neutral-400">

@@ -18,7 +18,7 @@
 import { NextResponse } from "next/server";
 import { generateContentWithFailover } from "@/utils/gemini";
 import { safeParseJsonArray } from "@/utils/safeJsonParser";
-import { validateResourceUrls } from "@/utils/validateResourceUrls";
+import { validateResourceUrls, isSearchEngineUrl } from "@/utils/validateResourceUrls";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const yts = require("yt-search");
@@ -50,6 +50,7 @@ interface WebResource {
     source: string;   // e.g., "MDN Web Docs", "Khan Academy", "3Blue1Brown"
     keyInsight: string;
     emoji: string;     // Visual indicator for the card
+    urlStatus?: "ok" | "unverified"; // set by validateResourceUrls
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -162,14 +163,26 @@ Return ONLY the JSON array, nothing else.`;
 
         const parsed = safeParseJsonArray<WebResource>(result.text);
         if (parsed && Array.isArray(parsed)) {
-            return parsed.slice(0, 10).map((r: WebResource) => ({
-                type: r.type || "article",
-                title: r.title || "Unknown",
-                url: r.url || "#",
-                source: r.source || "Web",
-                keyInsight: r.keyInsight || "",
-                emoji: r.emoji || "🔗",
-            }));
+            return parsed
+                .slice(0, 10)
+                .map((r: WebResource) => ({
+                    type: r.type || "article",
+                    title: r.title || "Unknown",
+                    url: r.url || "#",
+                    source: r.source || "Web",
+                    keyInsight: r.keyInsight || "",
+                    emoji: r.emoji || "🔗",
+                }))
+                // Generation-parse guard: the LLM sometimes lazily emits search
+                // links instead of a real resource URL. Reject those here so a
+                // search page can never reach the UI dressed up as a resource.
+                .filter((r) => {
+                    if (isSearchEngineUrl(r.url)) {
+                        console.warn(`📚 Rejected LLM search-engine URL for "${r.title}": ${r.url}`);
+                        return false;
+                    }
+                    return true;
+                });
         }
 
         return [];
@@ -252,16 +265,13 @@ export async function POST(req: Request) {
             addVideoInsights(rawVideos, nodeTitle),
         ]);
 
-        // Phase 3: Validate LLM-suggested URLs — dead links (404s etc.) are
-        // replaced with working fallbacks (domain search / Google search)
-        // before they ever reach the UI. Parallel HEAD checks, ≤10 links.
+        // Phase 3: Validate LLM-suggested URLs — working links pass through
+        // untouched; unreachable links KEEP their original url flagged
+        // {urlStatus:"unverified"} (never substituted with a search page);
+        // only literally malformed URLs are dropped. Parallel HEAD/GET, 6s.
         let safeWebResources = webResources;
         try {
             safeWebResources = await validateResourceUrls(webResources, topic);
-            const replaced = safeWebResources.filter((r, i) => r.url !== webResources[i]?.url).length;
-            if (replaced > 0) {
-                console.log(`📚 Resource Validator: Replaced ${replaced}/${webResources.length} dead link(s).`);
-            }
         } catch (err) {
             console.warn("⚠️ Resource URL validation failed (serving unvalidated):", err);
         }

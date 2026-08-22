@@ -1,154 +1,115 @@
 /**
  * validateResourceUrls.ts
  *
- * Validates each practiceResource URL by sending a HEAD request.
- * If the URL is unreachable (DNS failure, 404, 4xx, etc.) it replaces
- * it with a guaranteed-working fallback: a Google search for the resource
- * title + topic. This keeps the feature fully intact — the card still
- * shows, the link still opens something useful — we just never send the
- * user to a dead page.
+ * Validates each resource URL server-side (HEAD probe with GET fallback,
+ * 6s timeout, fully parallel).
+ *
+ * Contract (regression fix — NEVER substitute a search URL):
+ * - Working URLs pass through completely untouched.
+ * - Failed URLs keep their ORIGINAL url and are flagged
+ *   {urlStatus:"unverified"} so the UI can render a "we couldn't verify
+ *   this link" hint. We never rewrite them to Google/domain searches.
+ * - A resource is dropped ONLY when its url is literally malformed
+ *   (unparseable or not an absolute http(s) URL).
  */
 
-interface PracticeResource {
-  type: "visualization" | "interactive" | "article" | "exercise" | "tool";
+interface ResourceLike {
   title: string;
   url: string;
-  why: string;
-  effort: "5 min" | "15 min" | "30 min+";
-  emoji: string;
+  why?: string;
+  urlStatus?: "ok" | "unverified";
 }
 
-/** Domains that block HEAD/GET from servers (CORS/robots) but are definitely real */
-const TRUSTED_DOMAINS = [
-  "youtube.com",
-  "youtu.be",
-  "github.com",
-  "mdn.mozilla.org",
-  "developer.mozilla.org",
-  "en.wikipedia.org",
-  "arxiv.org",
-  "kaggle.com",
-  "colab.research.google.com",
-  "leetcode.com",
-  "hackerrank.com",
-  "codepen.io",
-  "replit.com",
-  "jsfiddle.net",
-  "stackblitz.com",
-  "phet.colorado.edu",
-  "wolframalpha.com",
-  "numpy.org",
-  "pytorch.org",
-  "tensorflow.org",
-  "docs.python.org",
-  "docs.oracle.com",
-  "cppreference.com",
-  "rust-lang.org",
-  "go.dev",
-];
-
-/** Safe search-level URLs per domain — used when AI gives a deep path that 404s */
-const DOMAIN_SEARCH_TEMPLATES: Record<string, (title: string, topic: string) => string> = {
-  "visualgo.net": (_, t) => `https://visualgo.net/en/${encodeURIComponent(t.toLowerCase().replace(/\s+/g, ""))}`,
-  "brilliant.org": (title) => `https://brilliant.org/search/?q=${encodeURIComponent(title)}`,
-  "khanacademy.org": (title) => `https://www.khanacademy.org/search?page_search_query=${encodeURIComponent(title)}`,
-  "3blue1brown.com": () => `https://www.3blue1brown.com/`,
-  "betterexplained.com": (title) => `https://betterexplained.com/?s=${encodeURIComponent(title)}`,
-  "observablehq.com": (title) => `https://observablehq.com/search?query=${encodeURIComponent(title)}`,
-  "desmos.com": () => `https://www.desmos.com/calculator`,
-  "geogebra.org": (title) => `https://www.geogebra.org/search/${encodeURIComponent(title)}`,
-  "scratch.mit.edu": () => `https://scratch.mit.edu/`,
-  "codecademy.com": (title) => `https://www.codecademy.com/search?query=${encodeURIComponent(title)}`,
-  "freecodecamp.org": (title) => `https://www.freecodecamp.org/news/search/?query=${encodeURIComponent(title)}`,
-  "geeksforgeeks.org": (title) => `https://www.geeksforgeeks.org/search/?query=${encodeURIComponent(title)}`,
-  "towardsdatascience.com": (title) => `https://towardsdatascience.com/search?q=${encodeURIComponent(title)}`,
-  "medium.com": (title) => `https://medium.com/search?q=${encodeURIComponent(title)}`,
-};
-
-function extractDomain(url: string): string {
+/** Rejects LLM-hallucinated search links at generation-parse time. */
+export function isSearchEngineUrl(url: string): boolean {
   try {
-    return new URL(url).hostname.replace(/^www\./, "");
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    return (
+      host === "google.com" ||
+      host.endsWith(".google.com") ||
+      host === "bing.com" ||
+      host === "duckduckgo.com"
+    );
   } catch {
-    return "";
-  }
-}
-
-function isTrustedDomain(url: string): boolean {
-  const domain = extractDomain(url);
-  return TRUSTED_DOMAINS.some((d) => domain === d || domain.endsWith("." + d));
-}
-
-function googleSearchFallback(title: string, topic: string): string {
-  return `https://www.google.com/search?q=${encodeURIComponent(`${title} ${topic}`)}`;
-}
-
-function buildFallbackUrl(url: string, title: string, topic: string): string {
-  const domain = extractDomain(url);
-  const template = DOMAIN_SEARCH_TEMPLATES[domain];
-  if (template) return template(title, topic);
-  return googleSearchFallback(title, topic);
-}
-
-async function checkUrl(url: string, timeoutMs = 4000): Promise<boolean> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(url, {
-      method: "HEAD",
-      signal: controller.signal,
-      redirect: "follow",
-      // Some sites reject requests without a user-agent
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; LearningDojoBot/1.0)" },
-    });
-    clearTimeout(timer);
-    // Accept any 2xx or 3xx — the redirect itself means the page exists
-    return res.status < 400;
-  } catch {
-    clearTimeout(timer);
     return false;
   }
 }
 
+function isWellFormedHttpUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+async function checkUrl(url: string, timeoutMs = 6000): Promise<boolean> {
+  // Some sites reject bare HEAD probes; retry once with GET before giving up.
+  for (const method of ["HEAD", "GET"] as const) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method,
+        signal: controller.signal,
+        redirect: "follow",
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; LearningDojoBot/1.0)" },
+      });
+      clearTimeout(timer);
+      if (res.status < 400) return true;
+      if (method === "GET") return false;
+    } catch {
+      clearTimeout(timer);
+      if (method === "GET") return false;
+    }
+  }
+  return false;
+}
+
 /**
  * Main export: validates every resource URL in parallel.
- * Dead URLs are replaced with a working fallback. Shape is preserved.
  *
- * Generic over the resource shape — anything with `title` and `url` works
- * (roadmap practiceResources AND dynamic web resources). The dead-link hint
- * is appended to `why` only when that field exists.
+ * Behavior:
+ * - alive        → resource returned unchanged (urlStatus:"ok")
+ * - unreachable  → ORIGINAL url kept, urlStatus set to "unverified"
+ * - malformed    → resource dropped entirely (not a http(s) URL)
  */
 export async function validateResourceUrls<
-  T extends { title: string; url: string; why?: string }
->(resources: T[], topic: string): Promise<T[]> {
+  T extends ResourceLike
+>(resources: T[], _topic?: string): Promise<T[]> {
+  void _topic; // kept for backward-compatible call sites; no longer used
+
   if (!resources || resources.length === 0) return [];
 
   const results = await Promise.all(
     resources.map(async (resource) => {
-      // Skip check for known-safe domains that block server-side requests
-      if (isTrustedDomain(resource.url)) {
-        return resource;
+      if (!isWellFormedHttpUrl(resource.url)) {
+        console.warn(
+          `[ResourceValidator] Dropped malformed URL for "${resource.title}": ${resource.url}`
+        );
+        return null;
+      }
+
+      if (isSearchEngineUrl(resource.url)) {
+        console.warn(
+          `[ResourceValidator] Dropped search-engine URL for "${resource.title}": ${resource.url}`
+        );
+        return null;
       }
 
       const isAlive = await checkUrl(resource.url);
 
       if (isAlive) {
-        return resource;
+        return { ...resource, urlStatus: "ok" } as T;
       }
 
-      // URL is dead — build a working fallback
-      const fallbackUrl = buildFallbackUrl(resource.url, resource.title, topic);
-      console.log(`[ResourceValidator] Dead URL replaced: ${resource.url} → ${fallbackUrl}`);
-
-      return {
-        ...resource,
-        url: fallbackUrl,
-        ...(resource.why !== undefined
-          ? { why: resource.why + " (Opens search — direct page unavailable.)" }
-          : {}),
-      };
+      console.log(
+        `[ResourceValidator] Unverified URL kept as-is (flagged): "${resource.title}" -> ${resource.url}`
+      );
+      return { ...resource, urlStatus: "unverified" } as T;
     })
   );
 
-  return results;
+  return results.filter((r) => r !== null) as T[];
 }

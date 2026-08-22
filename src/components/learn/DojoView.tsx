@@ -9,10 +9,15 @@ import SurgeonPanel from "@/components/SurgeonPanel";
 import BreakTimer from "@/components/BreakTimer";
 import BreakPopup from "@/components/BreakPopup";
 import { getContext } from "@/utils/learningContext";
+// Type-only import: vanishes at build time, no client bundle impact.
+import type { VideoSpec } from "@/utils/videoSpec";
 
 interface Chapter {
   chapterTitle: string;
   youtubeQuery: string;
+  // Emitted by generate-roadmap (normalized onto every chapter). Forwarded
+  // to get-video as spec=<JSON> so the judge has a duration window.
+  videoSpec?: VideoSpec;
 }
 
 interface Module {
@@ -264,9 +269,18 @@ export default function DojoView({
       if (siblingTitles.length > 0) params.append("siblingTitles", siblingTitles.join(","));
       if (course?.anchorChannel) params.append("preferredChannel", course.anchorChannel);
       if (playlistRefId) params.append("playlistRef", playlistRefId);
+      // M1 open-loop fix: forward the chapter's videoSpec (JSON-encoded;
+      // URLSearchParams URL-encodes it; route JSON.parses the spec param).
+      if (chapter.videoSpec) {
+        params.append("spec", JSON.stringify(chapter.videoSpec));
+      }
 
       const res = await fetch(`/api/get-video?${params.toString()}`);
       const data = await res.json();
+      console.log(
+        `🎯 get-video roadmap [${(chapter.chapterTitle || "").slice(0, 40)}] specSent=${Boolean(chapter.videoSpec)} specIgnored=${data.specIgnored ?? false}`,
+        data.debug ? data.debug : ""
+      );
 
       if (data.videos) {
         setChapterVideos(data.videos);

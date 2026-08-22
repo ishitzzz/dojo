@@ -28,6 +28,31 @@
         </section>
       </div>
 
+      <!-- UX defect #4d: shown when player.html is opened without a
+           videoId param (e.g. from the toolbar icon) instead of a
+           broken empty player. -->
+      <section id="setup-card" hidden>
+        <h2>Paste a YouTube link to focus on</h2>
+        <input
+          id="setup-video-input"
+          type="text"
+          placeholder="YouTube URL or 11-char video id"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <input
+          id="setup-platform-input"
+          type="text"
+          placeholder="Platform URL (optional, e.g. http://localhost:3000)"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <p id="setup-error" role="alert" hidden></p>
+        <button id="setup-start-btn" type="button" class="btn btn-primary">
+          Start focus lesson
+        </button>
+      </section>
+
       <footer id="foot">
         <button id="exit-btn" type="button">Exit lesson</button>
         <span id="meter"></span>

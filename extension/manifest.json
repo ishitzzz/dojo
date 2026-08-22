@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Dojo Companion",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Distraction-free focus player for Learning Dojo lessons with watch-progress telemetry.",
-  "permissions": ["storage", "scripting", "tabs"],
+  "permissions": ["storage", "scripting", "tabs", "contextMenus"],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
@@ -11,8 +11,17 @@
     "https://www.youtube.com/*",
     "https://*.googleapis.com/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
-    "default_title": "Dojo Companion",
-    "default_popup": "player.html"
-  }
+    "default_title": "Open Dojo Companion focus player"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content/platform-linker.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }

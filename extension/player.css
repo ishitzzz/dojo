@@ -157,3 +157,44 @@ button,
   font-size: 13px;
   color: var(--err);
 }
+
+/* UX defect #4d: param-less setup form */
+#setup-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid #2c3642;
+  border-radius: 8px;
+}
+
+#setup-card[hidden] {
+  display: none;
+}
+
+#setup-card h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+#setup-card input {
+  appearance: none;
+  border: 1px solid #2c3642;
+  border-radius: 6px;
+  background: #10151b;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+#setup-card input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#setup-error {
+  margin: 0;
+  font-size: 11px;
+  color: var(--err);
+}

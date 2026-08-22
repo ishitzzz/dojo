@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Scene } from "@/lib/whiteboard/commands";
 import { parseDrawCommand } from "@/lib/whiteboard/canvasInterceptor";
+import { estimateSceneSeconds } from "@/lib/whiteboard/pacing";
 import type { TurnEvent } from "@/lib/brain/types/events";
 import WhiteboardRenderer from "./WhiteboardRenderer";
 
@@ -15,6 +16,22 @@ import WhiteboardRenderer from "./WhiteboardRenderer";
 // playing, an interrupt box pauses board + TTS, asks the tutor via
 // the normal chat path on the same sessionId, shows the streamed
 // answer, then auto-resumes when the answer's DONE arrives.
+//
+// UX fixes layered in:
+// - Defect #2 (no voice): speechSynthesis.speak() without a prior user
+//   gesture is blocked in Brave and friends. The first scene therefore
+//   never auto-plays — a "▶ Start lesson" button gates playback, and
+//   its click handler synchronously primes speechSynthesis (a silent
+//   utterance) so every later speak() runs under that gesture's sticky
+//   activation. Utterance errors and voice-less browsers surface an
+//   inline "Narration unavailable" warning instead of silence. Mute
+//   still works; default is unmuted.
+// - Defect #3 ("scene 1 / 1"): the total scene count only becomes known
+//   when the RESULT event arrives; until then the badge says
+//   "Planning…"/"scene k" rather than a wrong "k / 1".
+// - Defect #1b (pacing): each active scene gets a duration hint
+//   (estimated natural seconds) which WhiteboardRenderer stretches into
+//   the ≥7s/≤25s window.
 // ═══════════════════════════════════════════════════════════════
 
 type Phase = "idle" | "planning" | "playing" | "interrupted" | "done" | "error";
@@ -64,10 +81,18 @@ export default function ExplainBoardPlayer({
     const [phase, setPhase] = useState<Phase>("idle");
     const [status, setStatus] = useState("");
     const [activeScene, setActiveScene] = useState<Scene | null>(null);
-    const [muted, setMuted] = useState(false);
+    const [muted, setMuted] = useState(false); // default: unmuted
     const [paused, setPaused] = useState(false);
     const [question, setQuestion] = useState("");
     const [answer, setAnswer] = useState("");
+    // Defect #2: playback (and thus the first speak()) waits for an
+    // explicit "▶ Start lesson" click — that click is the user gesture
+    // Brave requires before speechSynthesis will talk.
+    const [awaitingStart, setAwaitingStart] = useState(false);
+    // Defect #3: total scenes is only authoritative once RESULT arrives.
+    const [sceneIndex, setSceneIndex] = useState(0);
+    const [totalScenes, setTotalScenes] = useState<number | null>(null);
+    const [ttsWarning, setTtsWarning] = useState(false);
 
     // Mutable playback plumbing kept in refs so event handlers never
     // operate on stale values across async SSE iterations.
@@ -77,6 +102,8 @@ export default function ExplainBoardPlayer({
     const streamDoneRef = useRef(false);
     const pausedRef = useRef(false);
     const mutedRef = useRef(false);
+    const awaitingStartRef = useRef(false);
+    const ttsWarnedRef = useRef(false);
     const sessionIdRef = useRef<string | null>(null);
     const explainAbortRef = useRef<AbortController | null>(null);
     const tutorAbortRef = useRef<AbortController | null>(null);
@@ -84,6 +111,34 @@ export default function ExplainBoardPlayer({
     useEffect(() => {
         mutedRef.current = muted;
     }, [muted]);
+
+    // Defect #2 diagnostics: a browser with zero speech voices (or one
+    // whose synthesis errors out) gets a visible inline warning instead
+    // of silent failure. Voices load asynchronously in Chrome/Brave, so
+    // we only flag when they're still absent after voiceschanged or a
+    // grace timeout.
+    useEffect(() => {
+        if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+            flagTtsProblem();
+            return;
+        }
+        const synth = window.speechSynthesis;
+        const checkVoices = () => {
+            if (synth.getVoices().length === 0) flagTtsProblem();
+        };
+        synth.addEventListener?.("voiceschanged", checkVoices);
+        const timer = window.setTimeout(checkVoices, 2500);
+        return () => {
+            synth.removeEventListener?.("voiceschanged", checkVoices);
+            window.clearTimeout(timer);
+        };
+    }, []);
+
+    function flagTtsProblem(): void {
+        if (ttsWarnedRef.current) return;
+        ttsWarnedRef.current = true;
+        setTtsWarning(true);
+    }
 
     // Unmount cleanup: stop speech and any in-flight streams.
     useEffect(
@@ -95,12 +150,44 @@ export default function ExplainBoardPlayer({
         []
     );
 
+    /**
+     * UX defect #2: called synchronously inside the "▶ Start lesson"
+     * click handler chain so the very first speak() happens under user
+     * activation. The silent primer utterance establishes sticky
+     * activation for speechSynthesis (Brave blocks speak() on pages
+     * that never had a gesture), and getVoices() kick-starts the async
+     * voice-list load.
+     */
+    function primeSpeechSynthesis(): void {
+        try {
+            const synth = window.speechSynthesis;
+            synth.getVoices();
+            const primer = new SpeechSynthesisUtterance(" ");
+            primer.volume = 0;
+            primer.rate = 2;
+            synth.speak(primer);
+        } catch {
+            flagTtsProblem();
+        }
+    }
+
     function speak(text: string): void {
         if (mutedRef.current || text.length === 0) return;
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.rate = 1.02;
+        utterance.onerror = () => flagTtsProblem(); // never swallow silently
         window.speechSynthesis.speak(utterance);
+    }
+
+    /** "▶ Start lesson" click: gesture chain → prime → first scene speaks. */
+    function beginPlayback(): void {
+        primeSpeechSynthesis(); // synchronous, same call stack as the click
+        awaitingStartRef.current = false;
+        setAwaitingStart(false);
+        pausedRef.current = false;
+        waitingRef.current = false;
+        playNext();
     }
 
     function playNext(): void {
@@ -112,6 +199,7 @@ export default function ExplainBoardPlayer({
         }
         const next = queueRef.current.shift() ?? null;
         setActiveScene(next);
+        setSceneIndex((prev) => (next ? prev + 1 : prev));
         if (next) {
             speak(next.narration);
         } else if (streamDoneRef.current) {
@@ -128,7 +216,13 @@ export default function ExplainBoardPlayer({
         buildingRef.current = null;
         if (!scene || scene.drawCommands.length === 0) return;
         queueRef.current.push(scene);
-        if (waitingRef.current && !pausedRef.current) {
+        // Defect #2: while awaiting the explicit Start click the queue
+        // accumulates silently — no auto-play, no auto-speak.
+        if (
+            waitingRef.current &&
+            !pausedRef.current &&
+            !awaitingStartRef.current
+        ) {
             waitingRef.current = false;
             playNext();
         }
@@ -172,9 +266,21 @@ export default function ExplainBoardPlayer({
                 }
                 break;
             }
-            case "RESULT":
+            case "RESULT": {
                 flushBuilding();
+                // Defect #3: RESULT metadata carries the authoritative total
+                // ({ scenes: N, topic }) — until it arrives we never display
+                // a fabricated "k / 1".
+                const scenes = (event.metadata as { scenes?: unknown } | undefined)
+                    ?.scenes;
+                if (typeof scenes === "number" && Number.isFinite(scenes)) {
+                    setTotalScenes(Math.round(scenes));
+                } else if (typeof scenes === "string" && scenes.trim() !== "") {
+                    const n = Number(scenes);
+                    if (Number.isFinite(n)) setTotalScenes(Math.round(n));
+                }
                 break;
+            }
             case "ERROR":
                 flushBuilding();
                 setStatus(event.content ?? "Something went wrong");
@@ -182,7 +288,11 @@ export default function ExplainBoardPlayer({
             case "DONE":
                 flushBuilding();
                 streamDoneRef.current = true;
-                if (waitingRef.current && !pausedRef.current) {
+                if (
+                    !awaitingStartRef.current &&
+                    waitingRef.current &&
+                    !pausedRef.current
+                ) {
                     waitingRef.current = false;
                     playNext();
                 }
@@ -200,8 +310,14 @@ export default function ExplainBoardPlayer({
         waitingRef.current = true; // board idle, awaiting first scene
         streamDoneRef.current = false;
         pausedRef.current = false;
+        // Defect #2: no auto-play — the first scene waits for the
+        // explicit "▶ Start lesson" gesture.
+        awaitingStartRef.current = true;
+        setAwaitingStart(true);
         setPaused(false);
         setActiveScene(null);
+        setSceneIndex(0);
+        setTotalScenes(null);
         setAnswer("");
         setPhase("planning");
         setStatus("Planning your explanation…");
@@ -247,7 +363,11 @@ export default function ExplainBoardPlayer({
         setPaused(false);
         window.speechSynthesis.resume();
         setPhase((prev) => (prev === "done" || prev === "error" ? prev : "playing"));
-        if (waitingRef.current && queueRef.current.length > 0) {
+        if (
+            !awaitingStartRef.current &&
+            waitingRef.current &&
+            queueRef.current.length > 0
+        ) {
             waitingRef.current = false;
             playNext();
         }
@@ -324,12 +444,16 @@ export default function ExplainBoardPlayer({
         pausedRef.current = false;
         setPaused(false);
         streamDoneRef.current = true;
+        awaitingStartRef.current = false;
+        setAwaitingStart(false);
         queueRef.current = [];
         buildingRef.current = null;
         waitingRef.current = false;
         setPhase("idle");
         setStatus("");
         setActiveScene(null);
+        setSceneIndex(0);
+        setTotalScenes(null);
         setAnswer("");
     }
 
@@ -341,6 +465,24 @@ export default function ExplainBoardPlayer({
     const sceneArg = useMemo(() => (activeScene ? [activeScene] : []), [
         activeScene,
     ]);
+
+    // Defect #1b pacing: hand the renderer an estimated natural duration
+    // for the active scene; it stretches strokes into the 7-25s window.
+    const durationHints = useMemo(
+        () => (activeScene ? [estimateSceneSeconds(activeScene.drawCommands)] : undefined),
+        [activeScene]
+    );
+
+    // Defect #3 badge: "Planning…" while scenes accumulate, "scene k"
+    // once playing, "scene k / N" only after RESULT delivers N, and the
+    // renderer never falls back to its own (single-scene) total.
+    const sceneBadge = useMemo(() => {
+        if (phase === "done") return "complete";
+        if (!activeScene) return phase === "planning" ? "Planning…" : undefined;
+        // N only shown once RESULT delivered it; before that "scene k".
+        if (totalScenes === null) return `scene ${sceneIndex}`;
+        return `scene ${sceneIndex} / ${totalScenes}`;
+    }, [phase, activeScene, totalScenes, sceneIndex]);
 
     return (
         <section className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-4">
@@ -395,20 +537,48 @@ export default function ExplainBoardPlayer({
                 </p>
             )}
 
+            {ttsWarning && (
+                <p
+                    role="alert"
+                    className="mt-2 rounded-md border border-amber-700/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-300"
+                >
+                    Narration unavailable in this browser — the lesson will
+                    play silently. (Check the browser&rsquo;s audio permissions
+                    or try Chrome/Firefox.)
+                </p>
+            )}
+
             <div className="mt-4">
                 {activeScene ? (
-                    <WhiteboardRenderer
-                        scenes={sceneArg}
-                        speed={BOARD_SPEED}
-                        paused={paused}
-                        onSceneDone={() => playNext()}
-                    />
+                    <div className="relative">
+                        <WhiteboardRenderer
+                            scenes={sceneArg}
+                            speed={BOARD_SPEED}
+                            durationHints={durationHints}
+                            paused={paused}
+                            sceneLabelOverride={sceneBadge}
+                            onSceneDone={() => playNext()}
+                        />
+                        {/* Defect #2: first scene waits for this click so the
+                            initial speak() runs inside a real user gesture. */}
+                        {awaitingStart && (
+                            <button
+                                onClick={beginPlayback}
+                                autoFocus
+                                className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-neutral-950/70 text-lg font-semibold text-emerald-300 backdrop-blur-[2px] hover:bg-neutral-950/60"
+                            >
+                                ▶ Start lesson
+                            </button>
+                        )}
+                    </div>
                 ) : (
                     <div className="flex aspect-[8/5] w-full items-center justify-center rounded-lg border border-dashed border-neutral-800 bg-[#1e1e1e]">
                         <p className="text-sm text-neutral-600">
                             {phase === "idle"
                                 ? "Enter a topic and press Explain to start the board"
-                                : "Board will appear here…"}
+                                : phase === "planning"
+                                    ? "Planning…"
+                                    : "Board will appear here…"}
                         </p>
                     </div>
                 )}

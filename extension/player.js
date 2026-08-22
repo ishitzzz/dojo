@@ -56,6 +56,9 @@ const flags = {
   exitPosted: false,
 };
 
+// Platform URL remembered from storage for the setup-form placeholder.
+let storedPlatformUrlForForm = "";
+
 const els = {
   title: document.getElementById("lesson-title"),
   chip: document.getElementById("chapter-chip"),
@@ -66,7 +69,34 @@ const els = {
   exitBtn: document.getElementById("exit-btn"),
   meter: document.getElementById("meter"),
   status: document.getElementById("status"),
+  // UX defect #4d: param-less setup form elements.
+  setupCard: document.getElementById("setup-card"),
+  setupVideoInput: document.getElementById("setup-video-input"),
+  setupPlatformInput: document.getElementById("setup-platform-input"),
+  setupError: document.getElementById("setup-error"),
+  setupStartBtn: document.getElementById("setup-start-btn"),
 };
+
+// Same patterns as background.js — duplicated here because extension
+// pages can't import from the service worker.
+const YT_ID_PATTERNS = [
+  /[?&]v=([A-Za-z0-9_-]{11})/,
+  /youtu\.be\/([A-Za-z0-9_-]{11})/,
+  /\/embed\/([A-Za-z0-9_-]{11})/,
+  /\/shorts\/([A-Za-z0-9_-]{11})/,
+  /\/live\/([A-Za-z0-9_-]{11})/,
+];
+
+function extractVideoId(raw) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return null;
+  if (/^[A-Za-z0-9_-]{11}$/.test(value)) return value;
+  for (const re of YT_ID_PATTERNS) {
+    const match = value.match(re);
+    if (match) return match[1];
+  }
+  return null;
+}
 
 function setStatus(message, kind) {
   if (!els.status) return;
@@ -134,6 +164,12 @@ async function resolveSessionIdentity() {
     typeof stored.dojo_platform_url === "string"
       ? normalizeOrigin(stored.dojo_platform_url)
       : null;
+
+  // Surface the stored platform URL to the setup form placeholder.
+  storedPlatformUrlForForm =
+    typeof stored.dojo_platform_url === "string"
+      ? stored.dojo_platform_url
+      : "";
 
   // URL param wins; persist it once so later launches can omit it.
   session.platformUrl = fromParam || fromStorage || DEFAULT_PLATFORM_URL;
@@ -576,26 +612,118 @@ function renderFatal(message) {
   app.appendChild(box);
 }
 
+const boot = {
+  bound: false, // one-time listeners already attached
+  started: false, // bridge timers already running
+};
+
+function showSetupForm() {
+  if (els.shell) els.shell.hidden = true;
+  if (els.setupCard) els.setupCard.hidden = false;
+  if (els.exitBtn) els.exitBtn.disabled = true;
+  setStatus("Paste a YouTube link or video id to begin.");
+}
+
+async function startFromSetupForm() {
+  const parsedId = extractVideoId(
+    els.setupVideoInput ? els.setupVideoInput.value : ""
+  );
+  if (!parsedId) {
+    if (els.setupError) {
+      els.setupError.textContent =
+        "Could not find a YouTube video id — paste a watch URL (youtube.com/watch?v=…), a youtu.be link, or an 11-char id.";
+      els.setupError.hidden = false;
+    }
+    return;
+  }
+  if (els.setupError) els.setupError.hidden = true;
+
+  session.videoId = parsedId;
+  const platformRaw =
+    els.setupPlatformInput && els.setupPlatformInput.value.trim().length > 0
+      ? els.setupPlatformInput.value
+      : "";
+  const normalizedPlatform = normalizeOrigin(platformRaw);
+  if (platformRaw && !normalizedPlatform) {
+    if (els.setupError) {
+      els.setupError.textContent = "Platform URL must be an http(s) origin.";
+      els.setupError.hidden = false;
+      return;
+    }
+  }
+
+  // Hide the form and bring up the player in place.
+  if (els.setupCard) els.setupCard.hidden = true;
+  if (els.shell) els.shell.hidden = false;
+  await bootPlayer(normalizedPlatform || "");
+}
+
+/** Shared launch path for both URL-param and setup-form starts. */
+async function bootPlayer(platformUrlOverride) {
+  if (els.exitBtn) els.exitBtn.disabled = false;
+  renderHeader();
+  await resolveSessionIdentity();
+  // Explicit form entry wins over stored/default; persist it like a
+  // URL param would be.
+  if (platformUrlOverride && platformUrlOverride !== session.platformUrl) {
+    session.platformUrl = platformUrlOverride;
+    storageSet({ dojo_platform_url: platformUrlOverride });
+  }
+  createEmbed();
+
+  if (!boot.bound) {
+    boot.bound = true;
+    window.addEventListener("message", handleMessage);
+
+    // Early-exit capture: unload events use fire-and-forget beacon first.
+    window.addEventListener("pagehide", () => void queueEarlyExit(false));
+    window.addEventListener("beforeunload", () => void queueEarlyExit(false));
+    if (els.exitBtn) {
+      els.exitBtn.addEventListener("click", () => void handleExitClick());
+    }
+  }
+
+  if (!boot.started) {
+    boot.started = true;
+    startBridgeTimers();
+  } else {
+    // Re-entered from the form: the embed src changed, so the Widget API
+    // handshake must run against the fresh frame.
+    flags.playerReady = false;
+    flags.endedPosted = false;
+  }
+}
+
 async function init() {
+  // UX defect #4d: no videoId param no longer fatal — show the setup
+  // form (paste YouTube URL / id + optional platform URL) instead of a
+  // broken empty player.
   if (!session.videoId) {
-    renderFatal(
-      "Missing videoId parameter. Open player.html?videoId=<id>&platformUrl=http://localhost:3000&nextHref=/learn/..."
-    );
+    showSetupForm();
+    await resolveSessionIdentity(); // still resolve anon id + stored platform URL
+    if (
+      els.setupPlatformInput &&
+      typeof storedPlatformUrlForForm === "string" &&
+      storedPlatformUrlForForm
+    ) {
+      els.setupPlatformInput.placeholder =
+        "Platform URL (default: " + storedPlatformUrlForForm + ")";
+    }
+    if (els.setupStartBtn) {
+      els.setupStartBtn.addEventListener("click", () =>
+        void startFromSetupForm()
+      );
+    }
+    if (els.setupVideoInput) {
+      els.setupVideoInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") void startFromSetupForm();
+      });
+    }
+    els.setupVideoInput?.focus();
     return;
   }
 
-  renderHeader();
-  await resolveSessionIdentity();
-  createEmbed();
-
-  window.addEventListener("message", handleMessage);
-
-  // Early-exit capture: unload events use fire-and-forget beacon first.
-  window.addEventListener("pagehide", () => void queueEarlyExit(false));
-  window.addEventListener("beforeunload", () => void queueEarlyExit(false));
-  els.exitBtn.addEventListener("click", () => void handleExitClick());
-
-  startBridgeTimers();
+  await bootPlayer("");
 }
 
 init();

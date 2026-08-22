@@ -7,6 +7,8 @@ import AIChat from "./AIChat";
 import TutorChatDock from "./workspace/TutorChat";
 import BeatsPanel from "./workspace/BeatsPanel";
 import PracticeCard from "./workspace/PracticeCard";
+// Type-only import: vanishes at build time, no client bundle impact.
+import type { VideoSpec } from "@/utils/videoSpec";
 
 interface Chapter {
     chapterTitle: string;
@@ -15,6 +17,10 @@ interface Chapter {
     toolType?: "mcq" | "cloze" | "analogy";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     gamePayload?: any;
+    // Emitted by generate-roadmap (normalized onto every chapter) — gives the
+    // get-video judge a duration window so e.g. a 69-min crash course can't
+    // win an INTRO chapter.
+    videoSpec?: VideoSpec;
 }
 
 interface Module {
@@ -367,6 +373,15 @@ export default function Workspace({
             if (opts.rejectReason) params.append("rejectReason", opts.rejectReason);
             if (opts.fast) params.append("fast", "1");
 
+            // M1 open-loop fix: forward the chapter's videoSpec so the judge
+            // scores against the intended duration window. URLSearchParams
+            // JSON-encodes + URL-encodes automatically; the route parses it
+            // with JSON.parse(searchParams.get("spec")).
+            const chapterSpec = module.chapters[activeChapIdx]?.videoSpec;
+            if (chapterSpec) {
+                params.append("spec", JSON.stringify(chapterSpec));
+            }
+
             return params;
         },
         [activeYoutubeQuery, activeChapterTitle, activeChapIdx, module.chapters, module.playlist, anchorChannel]
@@ -395,6 +410,13 @@ export default function Workspace({
                 if (isStale()) return;
                 const data = await res.json();
                 if (isStale()) return;
+
+                // Diagnosis: confirm the spec actually reached + was honored
+                // by the judge pipeline.
+                console.log(
+                    `🎯 get-video [${activeChapterTitle.slice(0, 40)}] specSent=${Boolean(module.chapters[activeChapIdx]?.videoSpec)} specIgnored=${data.specIgnored ?? false}`,
+                    data.debug ? data.debug : ""
+                );
 
                 if (data.videos && data.videos.length > 0) {
                     setVideoOptions(data.videos);
@@ -565,6 +587,10 @@ export default function Workspace({
             if (isStale()) return;
             const data = await vres.json();
             if (isStale()) return;
+            console.log(
+                `🎯 get-video swap [${activeChapterTitle.slice(0, 40)}] specSent=${Boolean(module.chapters[activeChapIdx]?.videoSpec)} specIgnored=${data.specIgnored ?? false}`,
+                data.debug ? data.debug : ""
+            );
 
             if (data.videos && data.videos.length > 0) {
                 const pick = data.videos.find((v: { isPick: boolean }) => v.isPick) || data.videos[0];
