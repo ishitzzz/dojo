@@ -158,6 +158,47 @@ test suite (vitest) around rubric/judge/beats/pacing (pure modules first) ·
 observability (structured logs, per-route latency) · seed script for demos ·
 README/deployment story.
 
+### Cross-cutting: UI/UX Track (EVERY phase ships end-to-end UI) + Autonomous Browser Testing
+
+Rule: no backend feature is "done" until its themed UI exists AND an
+autonomous browser test proves it. Every phase carries a mandatory paired
+UI/UX milestone that PATCHES the previous UI (never rebuilds from scratch).
+
+| Phase | UI/UX deliverable (full, not basic) | Patches |
+|---|---|---|
+| A-UI | **Persona Studio** (persona cards, editor form, active-persona selector inside chat dock); **Memory Inspector** (L1 working / L2 notebook / L3 profile tabs; notes+highlights CRUD; write-memory affordances); tool-toggle settings drawer; capability debug drawer (live manifest view) | chat dock, Workspace sidebar |
+| B-UI | **Journey View**: beat-synced player page, current-beat highlight rail, check-gate modals for EVERY type (MCQ quiz, summary w/ scored feedback, flowchart drag-drop reconstruction, matching-pairs / fill-in-blank / step-ordering / T&F rapid mini-games), remediation ladder UX (hint → whiteboard → recap), mastery dashboard (progress rings, XP, streaks, badges), cross-session resume banner | Workspace video area, examiner states |
+| C-UI | **Whiteboard Studio**: diagram-type picker, scene list + reorder, live preview pane, replay/seek controls, export (PNG/SVG) menu, saved boards gallery, persisted speed/voice settings | /whiteboard page → full studio |
+| D-UI | Extension **Side Panel complete port** dojo-themed: guidance step cards, hint ladder visuals, ghost-cursor/overlay polish; **Trace Viewer** ("what we remembered" — recorded action traces w/ delete); arXiv walkthrough reader; resource-captured snackbars; token auth screens; deep-link return landing | extension surface, L2 notebook |
+| E-UI | **Resource Hub v2**: filter chips (type/domain/level), 👍/👎/bookmark on every card, personalized-ordering indicators ("because you prefer docs"), learner profile settings page (role/level/language/goals editor), self-healing proposal cards ("Module 3 rebalance?") w/ accept/dismiss | Resource Hub, roadmap views |
+
+UI acceptance bar per phase: all empty/loading/error states designed;
+keyboard-reachable; dark-mode AA contrast; consistent vocabulary with existing
+dojo theme; no dead-end clicks.
+
+#### Autonomous UI Testing (Playwright)
+Tooling: `@Playwright/test` (dev dep), specs in `tests/ui/*.spec.ts`, artifacts
+(=PNG snapshots, trace.zip, console+network logs, JSON assertions) written to
+`.ui-artifacts/` (gitignored). Optional Playwright MCP for ad-hoc agent
+exploration of the running app.
+
+| Suite | Automated flow (click-level, snapshot at each step) |
+|---|---|
+| ui-core | open /learn?topic=Terraform → roadmap renders → chapter video pick has score badge → alternative click switches in place |
+| ui-chat | open Tutor dock → send prompt → FIRST streamed CONTENT appears <30s → tool chip visible → history survives dock close/reopen |
+| ui-swap | 👎 → reason chip → SWAPPING state → new pick rendered, rejected id gone, no reload (assert same DOM node updated) |
+| ui-beats | seed long video → beats panel renders ≥6 beats → collapse/expand → no_transcript note case |
+| ui-whiteboard | open /whiteboard?topic=X → Start lesson → scenes progress >7s apart → interrupt question → answer streams → board resumes mid-scene |
+| ui-practice | get step → Mark done ✓ → outcome POST observed (route spy) → second step fetch |
+| ui-extension | launch Chromium with extension loaded (playwright persistent context) → focus player opens param-less form → telemetry POST asserted via route interception |
+| ui-resources | Resource Hub v2: filters work, 👎 persists, ordering changes |
+
+**Analysis loop (the autonomous part):** each run emits `.ui-artifacts/report.json`
++ step-indexed PNGs; a Validator subagent READS the report + snapshots
+(vision review: layout broken? overlap? wrong state?) → files defect list →
+Fix Worker → re-run until green. Gate: `npm run test:ui` must pass before ANY
+phase commit is pushed. Trace files kept for flaky-step debugging.
+
 ## 4. Execution method
 Same as sprint, scaled: Missions Orchestrator protocol — Discovery Swarm per
 unfamiliar subsystem (FolloMe internals, cat-catch, Scrapling), confidential
