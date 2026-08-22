@@ -474,8 +474,39 @@ export async function GET(request: Request) {
     try {
       const enrichmentMap = await fetchVideoDetails(candidateIds);
 
+      // An empty map = enrichment failed entirely (quota/network/missing key)
+      // — we learned nothing, so every candidate stays in play. A non-empty
+      // map proves the Data API answered, so any candidate it did NOT return
+      // is deleted/private/stale (yt-search serves such ghost ids).
       if (enrichmentMap.size > 0) {
-        candidates.forEach(candidate => {
+        // ═════════════════════════════════════════════════════════
+        // STEP 5.55: ☠️ DEAD-VIDEO GUARD
+        // Drop candidates the Data API doesn't recognize instead of letting
+        // the judge pick a "This video isn't available anymore" corpse.
+        // ═════════════════════════════════════════════════════════
+        const beforeGuard = candidates.length;
+        const guardedCandidates = candidates.filter((c) =>
+          enrichmentMap.has(c.videoId)
+        );
+        const droppedCount = beforeGuard - guardedCandidates.length;
+
+        if (beforeGuard > 0 && droppedCount === beforeGuard) {
+          // Data API recognized 0/N ids — likely a partial/anomalous response
+          // rather than mass deletion. Keep the pool to preserve the
+          // always-return-a-video contract.
+          console.warn(
+            `☠️ Dead-video guard: Data API recognized 0/${beforeGuard} ids — keeping pool intact (possible API anomaly).`
+          );
+        } else {
+          candidates = guardedCandidates;
+          if (droppedCount > 0) {
+            console.log(
+              `☠️ Dead-video guard: Dropped ${droppedCount}/${beforeGuard} candidate(s) unknown to the Data API (dead/private/stale ids).`
+            );
+          }
+        }
+
+        candidates.forEach((candidate) => {
           const details = enrichmentMap.get(candidate.videoId);
           if (details) {
             // Enrich the candidate with API data
@@ -489,7 +520,6 @@ export async function GET(request: Request) {
             // Update duration if we have exact data (parsing ISO 8601 to seconds would be ideal here)
             // For now, we trust the scraper's seconds but keep the ISO string if needed for debugging
 
-            enrichmentMap.delete(candidate.videoId);
             enrichedCount++;
           }
         });

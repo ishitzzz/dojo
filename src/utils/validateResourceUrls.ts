@@ -113,11 +113,14 @@ async function checkUrl(url: string, timeoutMs = 4000): Promise<boolean> {
 /**
  * Main export: validates every resource URL in parallel.
  * Dead URLs are replaced with a working fallback. Shape is preserved.
+ *
+ * Generic over the resource shape — anything with `title` and `url` works
+ * (roadmap practiceResources AND dynamic web resources). The dead-link hint
+ * is appended to `why` only when that field exists.
  */
-export async function validateResourceUrls(
-  resources: PracticeResource[],
-  topic: string
-): Promise<PracticeResource[]> {
+export async function validateResourceUrls<
+  T extends { title: string; url: string; why?: string }
+>(resources: T[], topic: string): Promise<T[]> {
   if (!resources || resources.length === 0) return [];
 
   const results = await Promise.all(
@@ -140,8 +143,9 @@ export async function validateResourceUrls(
       return {
         ...resource,
         url: fallbackUrl,
-        // Add a small hint in the why text that this is a search result
-        why: resource.why + " (Opens search — direct page unavailable.)",
+        ...(resource.why !== undefined
+          ? { why: resource.why + " (Opens search — direct page unavailable.)" }
+          : {}),
       };
     })
   );

@@ -4,6 +4,11 @@ import {
     type FunctionDeclaration,
     type GenerationConfig,
 } from "@google/generative-ai";
+import {
+    recordRateLimitHit,
+    rateLimitBackoff,
+    maybeStormCooldown,
+} from "@/utils/rateLimitDampener";
 
 // ═══════════════════════════════════════════════════════════════
 // GeminiProvider — streaming + function-calling transport.
@@ -17,8 +22,10 @@ import {
 // Adds what utils/gemini.ts lacks: token streaming and tool calls.
 // ═══════════════════════════════════════════════════════════════
 
-const PRIMARY_MODEL = "gemini-2.5-flash";
-const SECONDARY_MODEL = "gemini-2.5-flash-lite";
+// Stable Google aliases — always resolve to the newest GA Flash/Lite models,
+// immune to per-version deprecation (e.g. gemini-2.5-flash retirement).
+const PRIMARY_MODEL = "gemini-flash-latest";
+const SECONDARY_MODEL = "gemini-flash-lite-latest";
 
 export class BrainProviderError extends Error {
     constructor(message: string) {
@@ -168,6 +175,10 @@ export async function* streamChat(
     const totalAttempts = keys.length * 2; // every key × both models
     const errors: string[] = [];
     let attempt = 0;
+    let backoffBudgetMs = 0; // total dampening latency added this call (≤3s)
+
+    // Circuit breaker: one 12s cooldown if a 429 storm is in progress.
+    await maybeStormCooldown();
 
     // Strip brain-specific fields so they never leak into the wire payload
     // (unknown keys inside generation_config are rejected by the API with 400).
@@ -220,9 +231,14 @@ export async function* streamChat(
             chunkIterator =
                 result.stream as AsyncGenerator<GeminiStreamChunk>;
         } catch (initError) {
-            const verb = isRateLimitError(initError) ? "Rate limited" : "Failed";
+            const rateLimited = isRateLimitError(initError);
+            const verb = rateLimited ? "Rate limited" : "Failed";
             console.warn(`🔑 [brain] ${keyLabel} (${modelName}): ${verb}. Rotating...`);
             errors.push(`${keyLabel}/${modelName}: ${String(initError)}`);
+            if (rateLimited) {
+                recordRateLimitHit();
+                backoffBudgetMs = await rateLimitBackoff(backoffBudgetMs);
+            }
             attempt++;
             continue;
         }
@@ -263,11 +279,14 @@ export async function* streamChat(
             }
         } catch (streamError) {
             if (!yieldedAnything && !sawFunctionCalls) {
-                const verb = isRateLimitError(streamError)
-                    ? "Rate limited"
-                    : "Stream failed";
+                const rateLimited = isRateLimitError(streamError);
+                const verb = rateLimited ? "Rate limited" : "Stream failed";
                 console.warn(`🔑 [brain] ${keyLabel} (${modelName}): ${verb}. Rotating...`);
                 errors.push(`${keyLabel}/${modelName}: ${String(streamError)}`);
+                if (rateLimited) {
+                    recordRateLimitHit();
+                    backoffBudgetMs = await rateLimitBackoff(backoffBudgetMs);
+                }
                 attempt++;
                 continue;
             }

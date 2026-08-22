@@ -18,6 +18,7 @@
 import { NextResponse } from "next/server";
 import { generateContentWithFailover } from "@/utils/gemini";
 import { safeParseJsonArray } from "@/utils/safeJsonParser";
+import { validateResourceUrls } from "@/utils/validateResourceUrls";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const yts = require("yt-search");
@@ -251,11 +252,25 @@ export async function POST(req: Request) {
             addVideoInsights(rawVideos, nodeTitle),
         ]);
 
-        console.log(`📚 Found: ${videosWithInsights.length} videos, ${webResources.length} web resources`);
+        // Phase 3: Validate LLM-suggested URLs — dead links (404s etc.) are
+        // replaced with working fallbacks (domain search / Google search)
+        // before they ever reach the UI. Parallel HEAD checks, ≤10 links.
+        let safeWebResources = webResources;
+        try {
+            safeWebResources = await validateResourceUrls(webResources, topic);
+            const replaced = safeWebResources.filter((r, i) => r.url !== webResources[i]?.url).length;
+            if (replaced > 0) {
+                console.log(`📚 Resource Validator: Replaced ${replaced}/${webResources.length} dead link(s).`);
+            }
+        } catch (err) {
+            console.warn("⚠️ Resource URL validation failed (serving unvalidated):", err);
+        }
+
+        console.log(`📚 Found: ${videosWithInsights.length} videos, ${safeWebResources.length} web resources`);
 
         return NextResponse.json({
             videos: videosWithInsights,
-            resources: webResources,
+            resources: safeWebResources,
             fetchedAt: new Date().toISOString(),
         });
 

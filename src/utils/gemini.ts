@@ -1,4 +1,9 @@
 import { GoogleGenerativeAI, GenerationConfig } from "@google/generative-ai";
+import {
+    recordRateLimitHit,
+    rateLimitBackoff,
+    maybeStormCooldown,
+} from "@/utils/rateLimitDampener";
 
 /**
  * 🔑 Gemini API Key Pool — Round-Robin with 429 Failover
@@ -18,8 +23,10 @@ import { GoogleGenerativeAI, GenerationConfig } from "@google/generative-ai";
  * With 3 keys: ~750 requests/day, ~30-45 RPM
  */
 
-const PRIMARY_MODEL = "gemini-2.5-flash";
-const SECONDARY_MODEL = "gemini-2.5-flash-lite";
+// Stable Google aliases — always resolve to the newest GA Flash/Lite models,
+// immune to per-version deprecation (e.g. gemini-2.5-flash retirement).
+const PRIMARY_MODEL = "gemini-flash-latest";
+const SECONDARY_MODEL = "gemini-flash-lite-latest";
 
 // ═══════════════════════════════════════════════════════════════
 // KEY POOL MANAGEMENT
@@ -99,6 +106,10 @@ export async function generateContentWithFailover(
 
     const startIndex = getNextKeyIndex(keys.length);
     const errors: string[] = [];
+    let backoffBudgetMs = 0; // total dampening latency added this call (≤3s)
+
+    // Circuit breaker: one 12s cooldown if a 429 storm is in progress.
+    await maybeStormCooldown();
 
     // Try each key in round-robin order
     for (let attempt = 0; attempt < keys.length; attempt++) {
@@ -130,6 +141,7 @@ export async function generateContentWithFailover(
             };
         } catch (primaryError) {
             if (isRateLimitError(primaryError)) {
+                recordRateLimitHit();
                 console.warn(`🔑 Key ${keyLabel} (${PRIMARY_MODEL}): Rate limited. Trying secondary...`);
             } else {
                 console.warn(`⚠️ Key ${keyLabel} (${PRIMARY_MODEL}): Failed. Trying secondary...`);
@@ -157,6 +169,10 @@ export async function generateContentWithFailover(
                 if (isRateLimitError(secondaryError)) {
                     console.warn(`🔑 Key ${keyLabel} (${SECONDARY_MODEL}): Also rate limited. Rotating to next key...`);
                     errors.push(`Key ${keyLabel}: Both models rate limited`);
+                    // Dampen the storm: jittered backoff before rotating
+                    // (budget-capped so a full sweep adds ≤3s).
+                    recordRateLimitHit();
+                    backoffBudgetMs = await rateLimitBackoff(backoffBudgetMs);
                     continue; // Try next key
                 }
 
