@@ -281,6 +281,12 @@ export default function Workspace({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const [videoMeta, setVideoMeta] = useState<any>(null);
 
+    // M4.2 Real-time 👎 swap state
+    const [swapLoading, setSwapLoading] = useState(false);
+    const [feedbackError, setFeedbackError] = useState<string | null>(null);
+    const [showReasonPicker, setShowReasonPicker] = useState(false);
+    const [customReason, setCustomReason] = useState("");
+
     // Practice resources — can be overridden by Surgeon
     const [overridePracticeResources, setOverridePracticeResources] = useState<PracticeResource[] | null>(null);
 
@@ -288,6 +294,9 @@ export default function Workspace({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const playerRef = useRef<any>(null);
     const lastFetchedQueryRef = useRef<string>("");
+    // Monotonic epoch shared by the chapter-fetch effect and the dislike-swap
+    // path so stale responses can never overwrite newer state.
+    const fetchEpochRef = useRef(0);
     const topic = userContext?.topic || "Learning Path";
 
     const activeYoutubeQuery = activeChapter?.youtubeQuery || "";
@@ -306,38 +315,67 @@ export default function Workspace({
         setOverridePracticeResources(null);
     }, [activeChapIdx]);
 
+    // Shared get-video param construction (chapter fetch + dislike swap) so
+    // both paths stay consistent: same scoping params, seen-guard, and
+    // rejection reason handling.
+    const buildGetVideoParams = useCallback(
+        (opts: { excludeIds: string[]; rejectReason?: string; fast?: boolean }) => {
+            const params = new URLSearchParams({
+                q: activeYoutubeQuery,
+                // Rejection reason is sent as its own param (M4.2) — never
+                // appended to q, which would change search semantics/cacheKey.
+                excludeIds: Array.from(new Set(opts.excludeIds)).join(","),
+            });
+
+            if (activeChapterTitle) {
+                params.append("chapterTitle", activeChapterTitle);
+                const siblings = module.chapters
+                    .filter((_, i) => i !== activeChapIdx)
+                    .map((c) => c.chapterTitle)
+                    .filter(Boolean);
+                if (siblings.length > 0) {
+                    params.append("siblingTitles", siblings.join(","));
+                }
+            }
+
+            let playlistRefId = "";
+            const normalizedQuery = activeYoutubeQuery.trim().toLowerCase();
+            const playlistMatch = module.playlist?.entries?.find((entry) =>
+                (entry.topicMatched || "").trim().toLowerCase() === normalizedQuery
+            );
+            if (playlistMatch?.videoId) playlistRefId = playlistMatch.videoId;
+            if (playlistRefId) params.append("playlistRef", playlistRefId);
+            if (anchorChannel) params.append("preferredChannel", anchorChannel);
+            if (opts.rejectReason) params.append("rejectReason", opts.rejectReason);
+            if (opts.fast) params.append("fast", "1");
+
+            return params;
+        },
+        [activeYoutubeQuery, activeChapterTitle, activeChapIdx, module.chapters, module.playlist, anchorChannel]
+    );
+
     useEffect(() => {
         const fetchVideo = async () => {
-            const fetchKey = `${activeYoutubeQuery}|${anchorChannel || "none"}`;
+            const fetchKey = `${activeChapterTitle}|${activeYoutubeQuery}|${anchorChannel || "none"}`;
             if (lastFetchedQueryRef.current === fetchKey) {
                 return;
             }
             lastFetchedQueryRef.current = fetchKey;
 
+            const epoch = ++fetchEpochRef.current;
+            // Bail helper: stale responses must never overwrite newer state.
+            const isStale = () => fetchEpochRef.current !== epoch;
+
             setLoadingVideo(true);
             setVideoId(null);
             setVideoMeta(null);
             try {
-                let playlistRefId = "";
-                const normalizedQuery = activeYoutubeQuery.trim().toLowerCase();
-                const playlistMatch = module.playlist?.entries?.find((entry) =>
-                    (entry.topicMatched || "").trim().toLowerCase() === normalizedQuery
-                );
-
-                if (playlistMatch?.videoId) {
-                    playlistRefId = playlistMatch.videoId;
-                }
-
-                const params = new URLSearchParams({
-                    q: activeYoutubeQuery,
-                    excludeIds: seenVideoIds.join(","),
-                });
-
-                if (playlistRefId) params.append("playlistRef", playlistRefId);
-                if (anchorChannel) params.append("preferredChannel", anchorChannel);
+                const params = buildGetVideoParams({ excludeIds: seenVideoIds });
 
                 const res = await fetch(`/api/get-video?${params.toString()}`);
+                if (isStale()) return;
                 const data = await res.json();
+                if (isStale()) return;
 
                 if (data.videos && data.videos.length > 0) {
                     setVideoOptions(data.videos);
@@ -351,10 +389,11 @@ export default function Workspace({
                     if (!seenVideoIds.includes(data.videoId)) onVideoSeen(data.videoId);
                 }
 
-                if (typeof window !== "undefined" && data.source) {
+                if (typeof window !== "undefined" && data.source && !isStale()) {
                     localStorage.setItem("lastVideoSource", data.source);
                 }
 
+                if (isStale()) return;
                 if (data.densityScore !== undefined) {
                     setVideoMeta({ densityScore: data.densityScore, densityFlags: data.densityFlags, source: data.source });
                 } else if (data.source) {
@@ -362,14 +401,14 @@ export default function Workspace({
                 }
             } catch (_err) {
                 console.error("Failed to find video");
-                setVideoId("jfKfPfyJRdk");
+                if (!isStale()) setVideoId("jfKfPfyJRdk");
             } finally {
-                setLoadingVideo(false);
+                if (!isStale()) setLoadingVideo(false);
             }
         };
         fetchVideo();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeYoutubeQuery, anchorChannel]);
+    }, [activeChapterTitle, activeYoutubeQuery, anchorChannel, buildGetVideoParams]);
 
     useEffect(() => {
         const fetchContent = async () => {
@@ -419,6 +458,102 @@ export default function Workspace({
         height: "100%",
         width: "100%",
         playerVars: { autoplay: 1, controls: 1, rel: 0 },
+    };
+
+    // --- M4.2 Feedback helpers ---
+    const REJECT_REASONS = ["too basic", "too advanced", "wrong duration", "off-topic"];
+
+    const getAnonId = (): string => {
+        if (typeof window === "undefined") return "anonymous";
+        let id = localStorage.getItem("dojo_anon_id");
+        if (!id) {
+            id = crypto.randomUUID();
+            localStorage.setItem("dojo_anon_id", id);
+        }
+        return id;
+    };
+
+    const handleLike = async () => {
+        if (!videoId) return;
+        setFeedbackError(null);
+        try {
+            const res = await fetch("/api/feedback", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    userId: getAnonId(),
+                    videoId,
+                    chapterKey: activeChapterTitle,
+                    signal: "like",
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok || data.status !== "ok") {
+                throw new Error(data.error || "Feedback request failed");
+            }
+        } catch (e) {
+            setFeedbackError(`Could not record 👍: ${e instanceof Error ? e.message : "unknown error"}`);
+        }
+    };
+
+    const handleDislike = async (reason: string) => {
+        const rejectedVideoId = videoId;
+        if (!rejectedVideoId || swapLoading) return;
+        const epoch = ++fetchEpochRef.current;
+        const isStale = () => fetchEpochRef.current !== epoch;
+        setSwapLoading(true);
+        setFeedbackError(null);
+        setShowReasonPicker(false);
+        try {
+            const res = await fetch("/api/feedback", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    userId: getAnonId(),
+                    videoId: rejectedVideoId,
+                    chapterKey: activeChapterTitle,
+                    signal: "dislike",
+                    value: reason,
+                }),
+            });
+            const fbData = await res.json();
+            if (!res.ok || fbData.status !== "ok") {
+                throw new Error(fbData.error || "Failed to record dislike");
+            }
+
+            // Re-fetch excluding the rejected video; the reason rides along as
+            // rejectReason (server folds it into search queries only).
+            const params = buildGetVideoParams({
+                excludeIds: [...seenVideoIds, rejectedVideoId],
+                rejectReason: reason,
+                // Post-dislike swap uses the server fast-path (primary tier
+                // only, no sentinel, capped judge) to hit the <8s contract.
+                fast: true,
+            });
+
+            const vres = await fetch(`/api/get-video?${params.toString()}`);
+            if (isStale()) return;
+            const data = await vres.json();
+            if (isStale()) return;
+
+            if (data.videos && data.videos.length > 0) {
+                const pick = data.videos.find((v: { isPick: boolean }) => v.isPick) || data.videos[0];
+                setVideoOptions(data.videos);
+                setVideoId(pick.videoId);
+                onVideoSeen(pick.videoId);
+            } else {
+                setFeedbackError("No better match found — keeping current video.");
+            }
+        } catch (e) {
+            if (!isStale()) {
+                setFeedbackError(`Swap failed (${e instanceof Error ? e.message : "unknown error"}) — keeping current video.`);
+            }
+        } finally {
+            if (!isStale()) {
+                setSwapLoading(false);
+                setCustomReason("");
+            }
+        }
     };
 
     const handleVideoEnd = () => {
@@ -779,6 +914,95 @@ export default function Workspace({
                                 className="absolute inset-0"
                                 iframeClassName="w-full h-full"
                             />
+                        )}
+                    </div>
+
+                    {/* M4.2 Feedback controls */}
+                    <div className="flex items-center gap-2 flex-wrap shrink-0">
+                        <div
+                            className="flex items-center gap-1 rounded-lg px-1.5 py-1"
+                            style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
+                        >
+                            <button
+                                onClick={handleLike}
+                                disabled={swapLoading || !videoId}
+                                title="Good match"
+                                className="text-sm px-2 py-0.5 rounded active:scale-[0.97] hover-text-primary disabled:opacity-50"
+                                style={{ color: "var(--text-secondary)" }}
+                            >
+                                👍
+                            </button>
+                            <button
+                                onClick={() => setShowReasonPicker((v) => !v)}
+                                disabled={swapLoading || !videoId}
+                                title="Not a good match — swap for another video"
+                                className="text-sm px-2 py-0.5 rounded active:scale-[0.97] hover-text-primary disabled:opacity-50 font-mono text-xs"
+                                style={{ color: "var(--text-muted)" }}
+                            >
+                                {swapLoading ? "SWAPPING…" : "👎"}
+                            </button>
+                        </div>
+
+                        {showReasonPicker && (
+                            <div
+                                className="flex items-center gap-1.5 flex-wrap rounded-lg px-2 py-1.5"
+                                style={{ background: "var(--bg-card)", border: "1px solid var(--border)", opacity: swapLoading ? 0.5 : 1 }}
+                            >
+                                <span className="text-[10px] uppercase tracking-wide mr-1" style={{ color: "var(--text-muted)" }}>
+                                    Why?
+                                </span>
+                                {REJECT_REASONS.map((reason) => (
+                                    <button
+                                        key={reason}
+                                        onClick={() => handleDislike(reason)}
+                                        disabled={swapLoading}
+                                        className="text-[11px] px-2 py-0.5 rounded-full active:scale-[0.97] disabled:opacity-50 disabled:pointer-events-none"
+                                        style={{
+                                            background: "var(--accent-soft)",
+                                            color: "var(--accent)",
+                                            border: "1px solid transparent",
+                                        }}
+                                    >
+                                        {reason}
+                                    </button>
+                                ))}
+                                <input
+                                    type="text"
+                                    value={customReason}
+                                    onChange={(e) => setCustomReason(e.target.value)}
+                                    disabled={swapLoading}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter" && customReason.trim() && !swapLoading) handleDislike(customReason.trim());
+                                    }}
+                                    placeholder="other…"
+                                    className="text-[11px] px-2 py-0.5 rounded outline-none w-24 disabled:opacity-50"
+                                    style={{
+                                        background: "var(--bg-primary)",
+                                        border: "1px solid var(--border)",
+                                        color: "var(--text-primary)",
+                                    }}
+                                />
+                                {customReason.trim() && (
+                                    <button
+                                        onClick={() => handleDislike(customReason.trim())}
+                                        disabled={swapLoading}
+                                        className="text-[11px] px-2 py-0.5 rounded-full active:scale-[0.97] disabled:opacity-50 disabled:pointer-events-none"
+                                        style={{
+                                            background: "rgba(239,68,68,0.10)",
+                                            color: "#EF4444",
+                                            border: "1px solid rgba(239,68,68,0.25)",
+                                        }}
+                                    >
+                                        Swap →
+                                    </button>
+                                )}
+                            </div>
+                        )}
+
+                        {feedbackError && (
+                            <span className="text-[11px]" style={{ color: "#EF4444" }}>
+                                ⚠ {feedbackError}
+                            </span>
                         )}
                     </div>
 

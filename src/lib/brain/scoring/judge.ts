@@ -33,6 +33,16 @@ export interface JudgeInput {
     context?: ChapterContext;
 }
 
+export interface JudgeOptions {
+    /** Output token budget for the LLM call (default 1024; ~512 for fast swaps). */
+    maxOutputTokens?: number;
+    /**
+     * Cap how many candidates reach the LLM, keeping the top N by deterministic
+     * rubric score. Every candidate sent IS scored — never a winner-only ask.
+     */
+    maxCandidates?: number;
+}
+
 export interface JudgeResult {
     /** One merged score per judged candidate, sorted desc by finalScore. */
     ranked: MergedScore[];
@@ -107,8 +117,31 @@ RETURN JSON ONLY — an array with EXACTLY one object per candidate, same ids:
 ]`;
 }
 
-export async function judgeCandidates(input: JudgeInput): Promise<JudgeResult> {
-    const rubricScores = input.candidates.map((c) =>
+export async function judgeCandidates(
+    input: JudgeInput,
+    options?: JudgeOptions
+): Promise<JudgeResult> {
+    // Fast mode: pre-rank by rubric and only send the top slice to the LLM.
+    let candidates = input.candidates;
+    if (
+        options?.maxCandidates !== undefined &&
+        candidates.length > options.maxCandidates
+    ) {
+        const preRanked = candidates
+            .map((c) => ({
+                c,
+                pre: scoreRubric({
+                    candidate: c,
+                    spec: input.spec,
+                    context: input.context,
+                }),
+            }))
+            .sort((a, b) => b.pre.score - a.pre.score)
+            .slice(0, options.maxCandidates);
+        candidates = preRanked.map((p) => p.c);
+    }
+
+    const rubricScores = candidates.map((c) =>
         scoreRubric({ candidate: c, spec: input.spec, context: input.context })
     );
     const rubricById = new Map(rubricScores.map((r) => [r.videoId, r]));
@@ -124,17 +157,17 @@ export async function judgeCandidates(input: JudgeInput): Promise<JudgeResult> {
     if (hasAnyApiKey()) {
         try {
             const result = await generateContentWithFailover(
-                buildJudgePrompt(input, rubricScores),
+                buildJudgePrompt({ ...input, candidates }, rubricScores),
                 {
                     temperature: 0.1,
-                    maxOutputTokens: 1024,
+                    maxOutputTokens: options?.maxOutputTokens ?? 1024,
                     responseMimeType: "application/json",
                 }
             );
 
             const parsed = safeParseJsonArray<Partial<JudgeVerdict>>(result.text);
             if (parsed) {
-                const validIds = new Set(input.candidates.map((c) => c.videoId));
+                const validIds = new Set(candidates.map((c) => c.videoId));
                 verdicts = parsed
                     .filter(
                         (v): v is JudgeVerdict =>
@@ -177,7 +210,7 @@ export async function judgeCandidates(input: JudgeInput): Promise<JudgeResult> {
     const verdictById = new Map(verdicts.map((v) => [v.videoId, v]));
 
     // Candidates the judge skipped keep their pure rubric score.
-    const ranked: MergedScore[] = input.candidates.map((c) => {
+    const ranked: MergedScore[] = candidates.map((c) => {
         const r = rubricById.get(c.videoId)!;
         const v = verdictById.get(c.videoId);
         if (!v) {

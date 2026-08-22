@@ -131,6 +131,40 @@ export function getCachedVideo(videoId: string): VideoVaultEntry | null {
 }
 
 /**
+ * Remove a video from the vault entirely (local maps + best-effort
+ * Supabase delete). Used by dislike invalidation so a rejected video
+ * can never resurface from cache.
+ */
+export async function deleteVaultEntry(videoId: string): Promise<void> {
+    LOCAL_CACHE.delete(videoId);
+    for (const [key, cachedVideoId] of QUERY_HASH_CACHE.entries()) {
+        if (cachedVideoId === videoId) {
+            QUERY_HASH_CACHE.delete(key);
+        }
+    }
+
+    if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
+        try {
+            const { createClient } = await import("@supabase/supabase-js");
+            const supabase = createClient(
+                process.env.SUPABASE_URL!,
+                process.env.SUPABASE_KEY!
+            );
+            const { error } = await supabase
+                .from("video_vault")
+                .delete()
+                .eq("video_id", videoId);
+            if (error) {
+                throw error;
+            }
+        } catch (error) {
+            // Best-effort only — local invalidation already succeeded.
+            console.warn("⚠️ Supabase vault delete failed:", error);
+        }
+    }
+}
+
+/**
  * Clear local cache (for development/testing)
  */
 export function clearLocalCache(): void {

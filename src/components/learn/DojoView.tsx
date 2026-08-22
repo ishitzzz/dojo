@@ -254,6 +254,14 @@ export default function DojoView({
       if (playlistMatch?.videoId) playlistRefId = playlistMatch.videoId;
 
       const params = new URLSearchParams({ q: chapter.youtubeQuery, excludeIds: seenVideoIds.join(",") });
+      // Chapter scoping lets the server merge stored rejections and feed the
+      // M3 judge's scope-fit signal.
+      params.append("chapterTitle", chapter.chapterTitle);
+      const siblingTitles = (mod.chapters || [])
+        .filter((_, i) => i !== chapIdx)
+        .map((c) => c.chapterTitle)
+        .filter(Boolean);
+      if (siblingTitles.length > 0) params.append("siblingTitles", siblingTitles.join(","));
       if (course?.anchorChannel) params.append("preferredChannel", course.anchorChannel);
       if (playlistRefId) params.append("playlistRef", playlistRefId);
 

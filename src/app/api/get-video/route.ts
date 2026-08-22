@@ -21,6 +21,8 @@ import {
 import { fetchVideoDetails, YouTubeEnhancement } from "@/utils/youtubeClient";
 import { fetchIntroTranscripts } from "@/utils/transcriptClient";
 import { normalizeVideoSpec, bandToApiDuration, VideoSpec } from "@/utils/videoSpec";
+import { getFreshCacheEntry, setCacheEntry } from "@/lib/feedback/videoCache";
+import { getRejections, isRejectedForChapter } from "@/lib/feedback/rejections";
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -33,10 +35,8 @@ const CONFIG = {
   RELEVANCE_THRESHOLD: 25,     // Minimum relevance score to pass guard
 };
 
-// Lightweight in-memory cache
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const QUICK_CACHE = new Map<string, { videos?: any[], videoId?: string; timestamp: number }>();
-const CACHE_TTL = 1000 * 60 * 30; // 30 minutes
+// Lightweight in-memory cache lives in src/lib/feedback/videoCache.ts
+// (shared with the feedback route for dislike invalidation).
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Convert yt-search results to VideoCandidate[]
@@ -110,6 +110,19 @@ export async function GET(request: Request) {
   const siblingTitles = siblingTitlesParam
     ? siblingTitlesParam.split(",").map((s) => s.trim()).filter(Boolean)
     : undefined;
+  // M4.2: dislike reason guidance. Folded into SEARCH queries only — the
+  // cacheKey stays derived from the ORIGINAL q so cache identity is stable.
+  const rejectReason = (searchParams.get("rejectReason") || "").trim().toLowerCase();
+  // M4 fast-path: post-dislike swaps trade grounding depth for latency —
+  // primary search tier only, no transcript sentinel, capped judge budget.
+  const fast = searchParams.get("fast") === "1";
+  const REJECT_SEARCH_GUIDANCE: Record<string, string> = {
+    "too basic": "advanced in-depth",
+    "too advanced": "beginner introduction",
+  };
+  const searchGuidance = REJECT_SEARCH_GUIDANCE[rejectReason] || "";
+  const withGuidance = (searchQuery: string): string =>
+    searchGuidance ? `${searchQuery} ${searchGuidance}` : searchQuery;
   let topology: LearningTopology | undefined;
 
   const topologyParam = searchParams.get("topology");
@@ -154,6 +167,13 @@ export async function GET(request: Request) {
     ? Math.round(spec.expectedMinutes[0] * 60)
     : CONFIG.MIN_VIDEO_DURATION;
 
+  // "wrong duration" dislike → relax the spec floor by 50% for this request
+  // only (search/gating); the cacheKey keeps the ORIGINAL floor.
+  const searchMinDuration =
+    rejectReason === "wrong duration"
+      ? Math.round(effectiveMinDuration * 0.5)
+      : effectiveMinDuration;
+
   // Shared across all search tiers so every tier honors the same constraints.
   const videoDuration = spec ? bandToApiDuration(spec.targetDurationBand) : undefined;
   const publishedAfter =
@@ -175,16 +195,40 @@ export async function GET(request: Request) {
     spec ? `${spec.targetDurationBand}:${effectiveMinDuration}` : "nospec"
   }|${contextHash}`;
 
+  // Merge stored dislike-rejections (M4.1) into the exclusion list so
+  // previously rejected videos are filtered even when excludeIds is absent.
+  const rejectedIds = [
+    ...getRejections(cacheKey),
+    ...(chapterTitle ? getRejections(chapterTitle) : []),
+  ];
+  const effectiveExcludeIds = Array.from(new Set([...excludeIds, ...rejectedIds]));
+  if (rejectedIds.length > 0) {
+    console.log(`🚫 Merging ${rejectedIds.length} stored rejection(s) for: "${query.slice(0, 30)}..."`);
+  }
+
+  // M4.2 structural fix: also consult the by-video-id rejection index so a
+  // dislike is honored even when no client echoes query/chapter keys.
+  const isRejected = (videoId: string | undefined | null): boolean =>
+    Boolean(videoId) &&
+    (effectiveExcludeIds.includes(String(videoId)) ||
+      isRejectedForChapter(String(videoId), chapterTitle));
+
   // ═══════════════════════════════════════════════════════════════
   // STEP 1: Check Quick Cache
   // ═══════════════════════════════════════════════════════════════
-  const cached = QUICK_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+  const cached = getFreshCacheEntry(cacheKey);
+  if (cached) {
+    // Filter rejected/excluded videos out of the cached list BEFORE any
+    // short-circuit — a cached pick whose id is rejected must not be served.
+    const usableVideos = (cached.videos || []).filter(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (v: any) => !isRejected(v?.videoId)
+    );
     const mainVideoId = cached.videos ? cached.videos[0].videoId : cached.videoId;
-    if (mainVideoId && !excludeIds.includes(mainVideoId)) {
+    if (usableVideos.length > 0 && !isRejected(mainVideoId)) {
       console.log(`⚡ Quick cache hit for: "${query.slice(0, 30)}..."`);
       return NextResponse.json({
-        videos: cached.videos || [{ videoId: cached.videoId, title: "Cached Video", channel: "Vault", duration: "0:00", reason: "Loaded from cache", isPick: true }],
+        videos: usableVideos,
         source: "quick_cache",
         status: "ok",
         ...(specIgnored ? { specIgnored: true } : {}),
@@ -200,8 +244,8 @@ export async function GET(request: Request) {
   try {
     const vaultResult = await checkVideoVault(query, userRole, experience, contextHash);
 
-    // Check if the vault result is in the excluded list
-    const isExcluded = vaultResult.entry && excludeIds.includes(vaultResult.entry.video_id);
+    // Check if the vault result is in the excluded list or rejected by id
+    const isExcluded = vaultResult.entry && isRejected(vaultResult.entry.video_id);
 
     // Spec-awareness guard: a cached entry is only usable when its recorded
     // duration provably satisfies the requested spec floor — otherwise the hit
@@ -211,7 +255,7 @@ export async function GET(request: Request) {
       !spec ||
       (typeof entryDurationSeconds === "number" &&
         Number.isFinite(entryDurationSeconds) &&
-        entryDurationSeconds >= effectiveMinDuration);
+        entryDurationSeconds >= searchMinDuration);
 
     if (vaultResult.found && vaultResult.entry && !isExcluded && meetsSpecFloor) {
       console.log(`💾 Vault hit for: "${query.slice(0, 30)}..." -> ${vaultResult.entry.video_id}`);
@@ -224,7 +268,7 @@ export async function GET(request: Request) {
         reason: "Loaded from learning footprint",
         isPick: true
       };
-      QUICK_CACHE.set(cacheKey, { videos: [entryVid], timestamp: Date.now() });
+      setCacheEntry(cacheKey, { videos: [entryVid] });
       return NextResponse.json({
         videos: [entryVid],
         source: "video_vault",
@@ -256,9 +300,11 @@ export async function GET(request: Request) {
     let searchTierUsed = "smart_primary";
 
     // --- TIER 0: ANCHOR CHANNEL (with relevance validation) ---
-    if (preferredChannel) {
+    // Fast-path skips the anchor tier: it costs an extra search round-trip and
+    // the swap contract only needs a good-enough pick quickly.
+    if (preferredChannel && !fast) {
       console.log(`⚓ Attempting Anchor Channel search for: ${preferredChannel}`);
-      const anchorQuery = `"${preferredChannel}" ${query}`;
+      const anchorQuery = withGuidance(`"${preferredChannel}" ${query}`);
       const anchorResult = await searchVideos(
         anchorQuery,
         {
@@ -311,7 +357,7 @@ export async function GET(request: Request) {
     // --- TIER 1: SMART PRIMARY QUERY ---
     if (rawVideos.length === 0) {
       const primaryResult = await searchVideos(
-        smartQuery.primary,
+        withGuidance(smartQuery.primary),
         {
           maxResults: CONFIG.INITIAL_FETCH_COUNT,
           videoDuration,
@@ -330,7 +376,7 @@ export async function GET(request: Request) {
     if (rawVideos.length === 0) {
       console.warn("⚠️ Primary query returned 0. Trying fallback...");
       const fallbackResult = await searchVideos(
-        smartQuery.fallback,
+        withGuidance(smartQuery.fallback),
         {
           maxResults: CONFIG.INITIAL_FETCH_COUNT,
           videoDuration,
@@ -349,7 +395,7 @@ export async function GET(request: Request) {
     if (rawVideos.length === 0) {
       console.warn("⚠️ Fallback returned 0. Using raw query...");
       const rawResult = await searchVideos(
-        query,
+        withGuidance(query),
         {
           maxResults: CONFIG.INITIAL_FETCH_COUNT,
           videoDuration,
@@ -382,14 +428,17 @@ export async function GET(request: Request) {
 
     // Filter raw videos FIRST to ensure we don't slice away potential candidates
     let availableVideos = rawVideos;
-    if (excludeIds.length > 0) {
+    if (effectiveExcludeIds.length > 0) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      availableVideos = rawVideos.filter((v: any) => !excludeIds.includes(v.videoId));
+      availableVideos = rawVideos.filter((v: any) => !effectiveExcludeIds.includes(v.videoId));
       const removedCount = rawVideos.length - availableVideos.length;
       if (removedCount > 0) {
         console.log(`♻️ Pre-slice Deduplication: Ignored ${removedCount} excluded videos.`);
       }
     }
+    // By-video-id rejection index (M4.2): catch dislikes recorded under any
+    // scope, independent of client-sent excludeIds.
+    availableVideos = availableVideos.filter((v: { videoId?: string }) => !isRejected(v?.videoId));
 
     let candidates = toVideoCandidates(availableVideos, CONFIG.INITIAL_FETCH_COUNT);
 
@@ -459,18 +508,23 @@ export async function GET(request: Request) {
     // Only fetch for top 5 to save time/bandwidth (even though it's free)
     // We prioritize candidates that survived the density filter if possible, 
     // but here we just take the top ones from the API enriched list.
+    // Fast-path skips the sentinel entirely — transcript snippets are grounding
+    // sugar for the judge, not a correctness requirement, and they cost the
+    // swap pipeline its biggest wall-clock chunk.
     const sentinelIds = candidates.slice(0, 5).map(c => c.videoId);
 
-    try {
-      const transcriptMap = await fetchIntroTranscripts(sentinelIds);
+    if (!fast) {
+      try {
+        const transcriptMap = await fetchIntroTranscripts(sentinelIds);
 
-      candidates.forEach(candidate => {
-        if (transcriptMap.has(candidate.videoId)) {
-          candidate.transcriptSnippet = transcriptMap.get(candidate.videoId);
-        }
-      });
-    } catch (err) {
-      console.warn("⚠️ Transcript Sentinel skipped:", err);
+        candidates.forEach(candidate => {
+          if (transcriptMap.has(candidate.videoId)) {
+            candidate.transcriptSnippet = transcriptMap.get(candidate.videoId);
+          }
+        });
+      } catch (err) {
+        console.warn("⚠️ Transcript Sentinel skipped:", err);
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -520,7 +574,7 @@ export async function GET(request: Request) {
           experienceLevel: experience,
           spec,
           context: { chapterTitle, siblingTitles },
-        });
+        }, fast ? { maxOutputTokens: 512, maxCandidates: 4 } : undefined);
         scoredById = new Map(judgeResult.ranked.map((v) => [v.videoId, v]));
       } catch (err) {
         console.warn("⚠️ Judging for no_good_match report failed:", err);
@@ -529,7 +583,7 @@ export async function GET(request: Request) {
         status: "no_good_match",
         reason:
           `${relevantCandidates.length} relevant candidate(s) found, but every one is a >3x ` +
-          `duration mismatch vs the target window (${Math.round(effectiveMinDuration / 60)} min minimum).`,
+          `duration mismatch vs the target window (${Math.round(searchMinDuration / 60)} min minimum).`,
         videos: [],
         bestCandidates: buildBestCandidates(
           relevantCandidates,
@@ -545,6 +599,9 @@ export async function GET(request: Request) {
     // STEP 8: 🧑‍⚖️ SCORED JUDGE (rubric signals + LLM semantic scores)
     // Returns {videoId,score,reason}[] — never a winner-only pick.
     // ═══════════════════════════════════════════════════════════════
+    const judgeOptions = fast
+      ? { maxOutputTokens: 512, maxCandidates: 4 }
+      : undefined;
     const judgeResult = await judgeCandidates({
       candidates: poolCandidates,
       topic: contextAwareTopic,
@@ -552,7 +609,7 @@ export async function GET(request: Request) {
       experienceLevel: experience,
       spec,
       context: { chapterTitle, siblingTitles },
-    });
+    }, judgeOptions);
 
     const rankedByScore: MergedScore[] = judgeResult.ranked;
     const candidateById = new Map(poolCandidates.map((c) => [c.videoId, c]));
@@ -664,10 +721,7 @@ export async function GET(request: Request) {
       });
     }
 
-    QUICK_CACHE.set(cacheKey, {
-      videos: finalVideos,
-      timestamp: Date.now()
-    });
+    setCacheEntry(cacheKey, { videos: finalVideos });
 
     return NextResponse.json({
       status: "ok",
@@ -678,6 +732,7 @@ export async function GET(request: Request) {
         usedAnchorChannel: searchTierUsed === "anchor_channel",
         searchTier: searchTierUsed,
         judgeUsedLLM: judgeResult.usedLLM,
+        fastMode: fast,
       },
       ...(specIgnored ? { specIgnored: true } : {}),
     });
