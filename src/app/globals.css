@@ -1,0 +1,770 @@
+@import "tailwindcss/index.css";
+
+/* ═══════════════════════════════════════════════════
+   DESIGN TOKENS — LIGHT MODE (default)
+═══════════════════════════════════════════════════ */
+:root {
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F8F9FA;
+  --bg-card: #F1F3F5;
+  --text-primary: #0F0F0F;
+  --text-secondary: #4A4A4A;
+  --text-muted: #888888;
+  --accent: #1A73E8;
+  --accent-hover: #1557B0;
+  --accent-soft: #E8F0FE;
+  --border: #E0E0E0;
+  --border-hover: #BDBDBD;
+
+  /* Glass input */
+  --glass-input-bg: rgba(255, 255, 255, 0.45);
+  --glass-input-border: rgba(255, 255, 255, 0.6);
+
+  /* Legacy aliases (kept for backward compat) */
+  --bg: var(--bg-primary);
+  --surface: var(--bg-card);
+
+  /* Chatbox Gradient Border (Matched to Light Mode Aurora) */
+  --glow-1: #47E5C3; /* Bright Cyan/Teal */
+  --glow-2: #163AB2; /* Deep Blue */
+  --glow-3: #3C7DE8; /* Medium Blue */
+}
+
+/* ═══════════════════════════════════════════════════
+   DESIGN TOKENS — DARK MODE
+═══════════════════════════════════════════════════ */
+.dark {
+  --bg-primary: #0A0A0A;
+  --bg-secondary: #111111;
+  --bg-card: #1A1A1A;
+  --text-primary: #F5F5F5;
+  --text-secondary: #A0A0A0;
+  --text-muted: #5A5A5A;
+  --accent: #60A5FA;
+  --accent-hover: #93C5FD;
+  --accent-soft: #1E3A5F;
+  --border: #2A2A2A;
+  --border-hover: #404040;
+
+  /* Glass input */
+  --glass-input-bg: rgba(0, 0, 0, 0.25);
+  --glass-input-border: rgba(255, 255, 255, 0.12);
+
+  /* Legacy aliases */
+  --bg: var(--bg-primary);
+  --surface: var(--bg-card);
+
+  /* Separated Chat Glows (Dark Mode - Deep Cyan & Blue like Image 1) */
+  --glow-1: #00E5FF; /* Electric Cyan */
+  --glow-2: #0055FF; /* Deep Cobalt Blue */
+  --glow-3: #8B5CF6; /* Subtle Purple/Pink */
+}
+
+/* ═══════════════════════════════════════════════════
+   TAILWIND @theme BRIDGE
+═══════════════════════════════════════════════════ */
+@theme inline {
+  --color-background: var(--bg-primary);
+  --color-foreground: var(--text-primary);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* ═══════════════════════════════════════════════════
+   BASE STYLES
+═══════════════════════════════════════════════════ */
+html {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+h1,
+h2 {
+  font-family: 'DM Serif Display', 'Inter', serif;
+}
+
+/* ═══════════════════════════════════════════════════
+   MICRO-ANIMATIONS
+═══════════════════════════════════════════════════ */
+.fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.slide-up {
+  animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.scale-in {
+  animation: scaleIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes gradientCycle {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes blobDrift1 {
+  0% { transform: translate(0px, 0px) scale(1); }
+  50% { transform: translate(10px, -15px) scale(1.05); }
+  100% { transform: translate(0px, 0px) scale(1); }
+}
+
+@keyframes blobDrift2 {
+  0% { transform: translate(0px, 0px) scale(1); }
+  50% { transform: translate(-10px, 15px) scale(1.1); }
+  100% { transform: translate(0px, 0px) scale(1); }
+}
+
+/* ═══════════════════════════════════════════════════
+   LIVING AURORA BACKGROUND — OPACITY-ONLY ANIMATION
+   Zero transforms. Zero position changes. Zero layout thrash.
+   Only CSS property animated: opacity (0.7 ↔ 1.0).
+   Locked 60fps on any device.
+═══════════════════════════════════════════════════ */
+.aurora-container {
+  position: absolute;
+  inset: -150px;
+  overflow: visible;
+  z-index: 0;
+  background-color: transparent;
+  contain: strict;
+  pointer-events: none;
+}
+
+.aurora-base {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.aurora-blob {
+  position: absolute;
+  border-radius: 50%;
+  will-change: opacity;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+/* ──────── BREATHE KEYFRAMES (sine-like opacity pulse) ──────── */
+@keyframes breathe-1 {
+
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+
+  50% {
+    opacity: 1.0;
+  }
+}
+
+@keyframes breathe-2 {
+
+  0%,
+  100% {
+    opacity: 0.78;
+  }
+
+  50% {
+    opacity: 0.92;
+  }
+}
+
+@keyframes breathe-3 {
+
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+
+  50% {
+    opacity: 0.95;
+  }
+}
+
+@keyframes breathe-4 {
+
+  0%,
+  100% {
+    opacity: 0.75;
+  }
+
+  50% {
+    opacity: 1.0;
+  }
+}
+
+@keyframes breathe-5 {
+
+  0%,
+  100% {
+    opacity: 0.8;
+  }
+
+  50% {
+    opacity: 0.93;
+  }
+}
+
+/* Light Mode specific high-opacity keyframes */
+@keyframes light-breathe-1 {
+
+  0%,
+  100% {
+    opacity: 0.90;
+  }
+
+  50% {
+    opacity: 1.0;
+  }
+}
+
+@keyframes light-breathe-2 {
+
+  0%,
+  100% {
+    opacity: 0.90;
+  }
+
+  50% {
+    opacity: 1.0;
+  }
+}
+
+@keyframes light-breathe-3 {
+
+  0%,
+  100% {
+    opacity: 0.90;
+  }
+
+  50% {
+    opacity: 1.0;
+  }
+}
+
+@keyframes light-breathe-4 {
+
+  0%,
+  100% {
+    opacity: 0.90;
+  }
+
+  50% {
+    opacity: 1.0;
+  }
+}
+
+@keyframes light-breathe-5 {
+
+  0%,
+  100% {
+    opacity: 0.90;
+  }
+
+  50% {
+    opacity: 1.0;
+  }
+}
+
+/* ──────────────── DARK MODE BLOBS (ALTERNATING RINGS + SPLIT CENTER) ──────────────── */
+.dark-base {
+  background-color: #030712;
+  /* Pitch dark edge base */
+  overflow: hidden;
+}
+
+.dark-blob-1,
+.dark-blob-2,
+.dark-blob-3,
+.dark-blob-4,
+.dark-blob-5,
+.dark-blob-6 {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  display: block !important;
+}
+
+/* ──────────────── DARK MODE BLOBS (HIGHLY SATURATED, NO WHITE/GRAY) ──────────────── */
+.dark-base {
+  background-color: #02040A;
+  /* Pitch black/midnight base */
+  overflow: hidden;
+}
+
+.dark-blob-1,
+.dark-blob-2,
+.dark-blob-3,
+.dark-blob-4,
+.dark-blob-5,
+.dark-blob-6 {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  display: block !important;
+}
+
+/* 1. Deepest Background Navy Fill */
+.dark-blob-1 {
+  width: 100vw;
+  height: 100vh;
+  top: 50%;
+  left: 50%;
+  background-color: #0A1638;
+  filter: blur(150px);
+  z-index: 1;
+  animation: breathe-1 14s ease-in-out infinite alternate;
+}
+
+/* 2. The Purplish/Indigo Ring */
+.dark-blob-2 {
+  width: 85vw;
+  height: 85vw;
+  top: 50%;
+  left: 50%;
+  background-color: #2D1B63;
+  /* Highly saturated purple/indigo */
+  filter: blur(120px);
+  z-index: 2;
+  animation: breathe-2 16s ease-in-out infinite alternate-reverse;
+}
+
+/* 3. The Greenish/Teal Ring */
+.dark-blob-3 {
+  width: 70vw;
+  height: 70vw;
+  top: 50%;
+  left: 50%;
+  background-color: #0E6B62;
+  /* Vibrant, dark emerald */
+  filter: blur(100px);
+  z-index: 3;
+  animation: breathe-3 12s ease-in-out infinite alternate;
+}
+
+/* 4. The Deep Royal Blue Ring */
+.dark-blob-4 {
+  width: 55vw;
+  height: 55vw;
+  top: 50%;
+  left: 50%;
+  background-color: #1243A6;
+  /* Rich, saturated blue */
+  filter: blur(90px);
+  z-index: 4;
+  animation: breathe-4 10s ease-in-out infinite alternate-reverse;
+}
+
+/* 5. Upper Center (Behind Text): Bright Aqua/Cyan (NO WHITE) */
+.dark-blob-5 {
+  width: 40vw;
+  height: 40vw;
+  top: 40%;
+  left: 50%;
+  /* Shifted UP */
+  background-color: #1ACFC4;
+  /* Pure, vibrant aqua */
+  filter: blur(70px);
+  z-index: 5;
+  animation: breathe-5 8s ease-in-out infinite alternate;
+}
+
+/* 6. Lower Center (Under Input): Punchy Saturated Blue */
+.dark-blob-6 {
+  width: 35vw;
+  height: 35vw;
+  top: 60%;
+  left: 50%;
+  /* Shifted DOWN */
+  background-color: #1D4ED8;
+  /* Pure, deep blue */
+  filter: blur(60px);
+  z-index: 6;
+  animation: breathe-1 6s ease-in-out infinite alternate;
+}
+
+/* ──────────────── LIGHT MODE BLOBS (PURE IMAGE MATCH - NO WHITE) ──────────────── */
+.light-base {
+  background-color: #52E0C4;
+  /* Base mint green for the extreme corners */
+  overflow: hidden;
+}
+
+.light-blob-1,
+.light-blob-2,
+.light-blob-3,
+.light-blob-4,
+.light-blob-5,
+.light-blob-6 {
+  position: absolute;
+  border-radius: 50%;
+  display: block !important;
+  transform: translate(-50%, -50%);
+}
+
+/* 1 & 2: The massive Deep Blue outer ring */
+.light-blob-1 {
+  width: 85vw;
+  height: 75vh;
+  top: 50%;
+  left: 50%;
+  background-color: #163AB2;
+  filter: blur(140px);
+  z-index: 1;
+  animation: light-breathe-1 14s ease-in-out infinite alternate;
+}
+
+.light-blob-2 {
+  width: 70vw;
+  height: 70vw;
+  top: 45%;
+  left: 55%;
+  background-color: #1A44D1;
+  /* Slightly brighter deep blue for the oil swirl */
+  filter: blur(130px);
+  z-index: 2;
+  animation: light-breathe-2 16s ease-in-out infinite alternate-reverse;
+}
+
+/* 3 & 4: The bright Cyan inner halo */
+.light-blob-3 {
+  width: 50vw;
+  height: 50vw;
+  top: 50%;
+  left: 50%;
+  background-color: #47E5C3;
+  filter: blur(100px);
+  z-index: 3;
+  animation: light-breathe-3 13s ease-in-out infinite alternate;
+}
+
+.light-blob-4 {
+  width: 45vw;
+  height: 45vw;
+  top: 55%;
+  left: 45%;
+  background-color: #3CD0B1;
+  filter: blur(100px);
+  z-index: 4;
+  animation: light-breathe-4 11s ease-in-out infinite alternate-reverse;
+}
+
+/* 5. Top Half Center: Lighter, softer sky blue behind the text */
+.light-blob-5 {
+  width: 35vw;
+  height: 35vw;
+  top: 42%;
+  left: 50%;
+  /* Shifted UP */
+  background-color: #7CAAF5;
+  /* Softer, hazy sky blue */
+  filter: blur(80px);
+  z-index: 5;
+  animation: light-breathe-5 9s ease-in-out infinite alternate;
+}
+
+/* 6. Bottom Half Center: Smaller, deeper blue behind/under the input box */
+.light-blob-6 {
+  width: 28vw;
+  height: 28vw;
+  /* Noticeably smaller */
+  top: 56%;
+  left: 50%;
+  /* Shifted DOWN */
+  background-color: #3C7DE8;
+  /* Richer, punchier medium blue */
+  filter: blur(70px);
+  z-index: 6;
+  animation: light-breathe-1 8s ease-in-out infinite alternate;
+}
+
+
+
+
+.circle-reveal {
+  z-index: 1;
+  animation: circle-reveal 1.0s ease-out forwards;
+}
+
+@keyframes circle-reveal {
+  0% {
+    clip-path: circle(0px at var(--x, 50%) var(--y, 50%));
+    -webkit-clip-path: circle(0px at var(--x, 50%) var(--y, 50%));
+  }
+
+  100% {
+    clip-path: circle(200vmax at var(--x, 50%) var(--y, 50%));
+    -webkit-clip-path: circle(200vmax at var(--x, 50%) var(--y, 50%));
+  }
+}
+
+.film-grain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  opacity: 0.04;
+  mix-blend-mode: overlay;
+  z-index: 2;
+}
+
+/* ═══════════════════════════════════════════════════
+   GLASSMORPHISM CARDS
+═══════════════════════════════════════════════════ */
+.glass-card {
+  background: rgba(255, 255, 255, 0.08) !important;
+  backdrop-filter: blur(20px) !important;
+  -webkit-backdrop-filter: blur(20px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease !important;
+}
+
+.glass-card:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: rgba(255, 255, 255, 0.25) !important;
+  box-shadow: 0 0 24px rgba(0, 0, 0, 0.1) !important;
+}
+
+.glass-input {
+  background: rgba(255, 255, 255, 0.08) !important;
+  backdrop-filter: blur(20px) !important;
+  -webkit-backdrop-filter: blur(20px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease !important;
+}
+
+.glass-input:focus {
+  background: rgba(255, 255, 255, 0.12) !important;
+  border-color: rgba(255, 255, 255, 0.3) !important;
+  box-shadow: 0 0 20px rgba(0, 201, 177, 0.2) !important;
+}
+
+/* ═══════════════════════════════════════════════════
+   SCROLLBAR
+═══════════════════════════════════════════════════ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hover);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+.nexus-workspace-overlay * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.nexus-workspace-overlay::-webkit-scrollbar {
+  width: 4px;
+}
+
+/* ═══════════════════════════════════════════════════
+   REACTFLOW OVERRIDES
+═══════════════════════════════════════════════════ */
+.react-flow__controls {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+
+.react-flow__controls-button {
+  background: var(--bg-card) !important;
+  border-color: var(--border) !important;
+  color: var(--text-secondary) !important;
+  fill: var(--text-secondary) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--bg-primary) !important;
+  color: var(--text-primary) !important;
+  fill: var(--text-primary) !important;
+}
+
+/* ═══════════════════════════════════════════════════
+   CSS HOVER UTILITIES (replaces JS onMouseEnter/Leave)
+   Browser handles these via optimized style engine —
+   zero JS main-thread cost per hover event.
+═══════════════════════════════════════════════════ */
+
+/* Theme toggle: standalone variant */
+.theme-toggle-standalone {
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.theme-toggle-standalone:hover {
+  background: rgba(255, 255, 255, 0.18) !important;
+  color: #fff !important;
+}
+
+/* Theme toggle: sidebar variant */
+.theme-toggle-sidebar {
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.theme-toggle-sidebar:hover {
+  color: var(--text-primary) !important;
+  border-color: var(--border-hover) !important;
+}
+
+/* Theme toggle: fixed (default) variant */
+.theme-toggle-fixed {
+  transition: color 150ms ease, border-color 150ms ease;
+}
+.theme-toggle-fixed:hover {
+  color: var(--text-primary) !important;
+  border-color: var(--border-hover) !important;
+}
+
+/* Option button hover (ConversationalUI, DojoView break setup) */
+.option-btn-hover {
+  transition: border-color 200ms ease;
+}
+.option-btn-hover:hover {
+  border-color: var(--text-muted) !important;
+}
+
+/* Back button hover */
+.hover-text-primary {
+  transition: color 150ms ease;
+}
+.hover-text-primary:hover {
+  color: var(--text-primary) !important;
+}
+
+/* Video card idle state hover */
+.video-card-hover {
+  transition: border-color 150ms ease;
+}
+.video-card-hover:hover {
+  border-color: var(--border-hover) !important;
+}
+
+/* Resource link hover */
+.resource-link-hover {
+  transition: border-color 150ms ease;
+}
+.resource-link-hover:hover {
+  border-color: var(--accent) !important;
+}
+.resource-link-hover.search-fallback:hover {
+  border-color: #F59E0B !important;
+}
+
+/* Dynamic hover button */
+.dynamic-hover-btn {
+  background: var(--btn-bg) !important;
+  transition: background-color 150ms ease !important;
+}
+.dynamic-hover-btn:hover {
+  background: var(--btn-bg-hover) !important;
+}
+
+/* AppShell utilities */
+.appshell-nav-hover:hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: var(--text-primary) !important;
+}
+.appshell-nav-hover.active:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: var(--accent) !important;
+}
+
+.hover-bg-card {
+  transition: background-color 150ms ease !important;
+}
+.hover-bg-card:hover {
+  background: var(--bg-card) !important;
+}
+
+/* RoadmapSurgeon utilities */
+.roadmap-surgeon-btn-hover {
+  transition: transform 150ms ease, box-shadow 150ms ease !important;
+}
+.roadmap-surgeon-btn-hover:hover {
+  transform: scale(1.03) !important;
+  box-shadow: 0 8px 30px rgba(99,102,241,0.35) !important;
+}
+.roadmap-surgeon-close-hover {
+  transition: color 150ms ease !important;
+}
+.roadmap-surgeon-close-hover:hover {
+  color: #F4F4F5 !important;
+}
+.roadmap-surgeon-chip-hover {
+  transition: border-color 150ms ease, color 150ms ease !important;
+}
+.roadmap-surgeon-chip-hover:hover {
+  border-color: #6366F1 !important;
+  color: #F4F4F5 !important;
+}
