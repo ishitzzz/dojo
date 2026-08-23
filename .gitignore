@@ -65,3 +65,8 @@ superpowers_integration_plan.md
 architecture_hypothesis.md
 video_pipeline_hypothesis.md
 *.bak
+
+# reference repos (local only)
+/agent-reach/
+/linkwarden/
+/wiki-graph/

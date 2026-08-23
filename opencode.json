@@ -9,7 +9,10 @@
       ".git/**",
       "playlist-forge/**",
       ".learning-workspace/**",
-      ".ua/**"
+      ".ua/**",
+      "agent-reach/**",
+      "linkwarden/**",
+      "wiki-graph/**"
     ]
   }
 }
