@@ -1,0 +1,1128 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc 3.10.1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Learning Dojo — Detailed Masterplan</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="/tmp/masterplan_style.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-dark.min.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:"dark",flowchart:{useMaxWidth:true}});</script>
+<style>.markdown-body{max-width:960px;margin:0 auto;padding:48px 32px;background:transparent}</style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Learning Dojo — Detailed Masterplan</h1>
+</header>
+<h1 id="learning-dojo--detailed-architecture-companion">Learning Dojo —
+Detailed Architecture Companion</h1>
+<blockquote>
+<p>Companion to <code>architecture_masterplan.md</code>
+(phases/features) and <code>architecture_hypothesis.md</code> +
+<code>video_pipeline_hypothesis.md</code> (verified designs). Status:
+DRAFT for user approval. Claims grounded in those docs and in
+cloned-source scans (<code>agent-reach</code>, <code>linkwarden</code>,
+<code>wiki-graph</code>, <code>followme-extension</code>); speculation
+is marked <strong>(proposed)</strong>.</p>
+</blockquote>
+<hr />
+<h1 id="1-system-topology">1. System Topology</h1>
+<div class="mermaid">
+graph TD
+    subgraph EXT["Chrome Extension - Dojo Companion MV3"]
+        SW["Service Worker<br/>auth token, duplex client,<br/>tab orchestration, offscreen doc"]
+        SP["Side Panel UI<br/>guidance steps / chat / progress"]
+        CS_YT["Content script: youtube adapter<br/>watch-page strip, transcript panel read"]
+        CS_PLAT["Content script: platform linker<br/>deep-link handoff"]
+        CS_ARXIV["Content script: arxiv adapter<br/>paper extractor, highlights"]
+        CS_FIGMA["Content scripts: figma/docs adapters<br/>resolver stack, overlay, PassiveTracker"]
+        REC["Recorder agent<br/>consent-gated action traces"]
+        SNIFF["Resource sniffer<br/>webRequest pairing, WebVTT, MSE capture"]
+    end
+
+<pre><code>subgraph NEXT[&quot;Next.js Platform&quot;]
+    subgraph BRAIN[&quot;src/lib/brain - brain core&quot;]
+        ORCH[&quot;Orchestrator&lt;br/&gt;startTurn facade&quot;]
+        REG[&quot;CapabilityRegistry&lt;br/&gt;manifests per capability&quot;]
+        LOOP[&quot;AgentLoop&lt;br/&gt;6-round budget, forced finish&quot;]
+        BUS[&quot;TurnBus&lt;br/&gt;typed TurnEvents + replay&quot;]
+        MOUNT[&quot;composeEnabledTools&lt;br/&gt;mounting policy pure fn&quot;]
+        TREG[&quot;ToolRegistry&lt;br/&gt;BaseTool, aliases, schemas&quot;]
+        PROV[&quot;ProviderLayer&lt;br/&gt;Gemini + Groq adapters, key pool&quot;]
+        MEM[&quot;Memory service L1/L2/L3&quot;]
+        PERS[&quot;Persona loader + Persona Studio&quot;]
+        SKILL[&quot;Skills manifest + read_skill&quot;]
+    end
+
+    TURN[&quot;POST /api/turn&lt;br/&gt;SSE stream of TurnEvents&lt;br/&gt;capability param&quot;]
+    CLIENTREG[&quot;Client registry&lt;br/&gt;extension tabs as endpoints&quot;]
+    DUPLEX[&quot;Duplex channel&lt;br/&gt;SSE now, WS when needed&quot;]
+    APIR[&quot;Legacy/capability routes&lt;br/&gt;video-beats, practice-plan/outcome,&lt;br/&gt;feedback, get-transcript, upload-syllabus&quot;]
+
+    subgraph SB[&quot;Supabase&quot;]
+        T_AUTH[&quot;auth.users + RLS&quot;]
+        T_CTX[&quot;learning_contexts - L2 notebook&quot;]
+        T_MEM[&quot;memory_docs - L3 profile&quot;]
+        T_PERSONAS[&quot;personas&quot;]
+        T_VAULT[&quot;video_vault&quot;]
+        T_VFB[&quot;video_feedback&quot;]
+        T_BEATS[&quot;beat_progress&quot;]
+        T_PROG[&quot;user_progress - feynman_passed&quot;]
+        T_NODES[&quot;knowledge_nodes + node_edges&quot;]
+        T_NEXUS[&quot;nexus_cache&quot;]
+        T_RES[&quot;resources + pgvector embedding&quot;]
+        T_RFB[&quot;resource_feedback&quot;]
+        T_SIG[&quot;profile_signals&quot;]
+        T_PRAC[&quot;practice_plans + practice_outcomes&quot;]
+        T_EX[&quot;exemplar_store (proposed)&quot;]
+    end
+end
+
+subgraph EXTERNAL[&quot;External services&quot;]
+    GEM[&quot;Gemini API&quot;]
+    GROQ[&quot;Groq API&quot;]
+    YTAPI[&quot;YouTube Data API v3&quot;]
+    OEMBED[&quot;YouTube oEmbed liveness guard&quot;]
+    ARCLI[&quot;agent-reach CLI processes&lt;br/&gt;Reddit / X / YouTube / GitHub /&lt;br/&gt;LinkedIn / Bilibili / XiaoHongShu&quot;]
+    SCRAP[&quot;Scrapling sidecar&lt;br/&gt;python process, JSON over stdio/HTTP&quot;]
+    LW[&quot;Linkwarden instance&lt;br/&gt;REST API + API key&quot;]
+    WIKIG[&quot;wiki-graph CLI wg&lt;br/&gt;.wikg spine distillation&quot;]
+    JINA[&quot;Jina Reader via agent-reach web channel&quot;]
+end
+
+%% UI edges
+WEBUI[&quot;Web UI: Workspace chat dock,&lt;br/&gt;Journey View, Whiteboard Studio,&lt;br/&gt;Resource Hub v2, NexusView&quot;] --&gt;|&quot;fetch POST + SSE&quot;| TURN
+SP --&gt;|&quot;user replies, ask_user answers&quot;| SW
+SW &lt;--&gt;|&quot;duplex TurnEvents SSE/WS&quot;| DUPLEX
+DUPLEX --&gt; TURN
+TURN --&gt; ORCH
+ORCH --&gt; REG
+REG --&gt;|&quot;capability.run&quot;| LOOP
+LOOP --&gt; BUS
+BUS --&gt;|&quot;SSE events&quot;| WEBUI
+BUS --&gt;|&quot;TurnEvents&quot;| DUPLEX
+MOUNT --&gt; TREG
+TREG --&gt; LOOP
+LOOP --&gt;|&quot;chatStream messages tools&quot;| PROV
+PROV --&gt;|&quot;HTTPS streaming&quot;| GEM
+PROV --&gt;|&quot;HTTPS OpenAI-compatible&quot;| GROQ
+ORCH --&gt; MEM
+ORCH --&gt; PERS
+PERS --&gt;|&quot;eager block inject&quot;| LOOP
+SKILL --&gt;|&quot;lazy manifest&quot;| LOOP
+
+%% tool edges
+TREG --&gt;|&quot;find_video&quot;| YTAPI
+TREG --&gt;|&quot;liveness check&quot;| OEMBED
+TREG --&gt;|&quot;get_transcript&quot;| APIR
+TREG --&gt;|&quot;reach_query spawn CLI&quot;| ARCLI
+TREG --&gt;|&quot;find_resources crawl&quot;| SCRAP
+TREG --&gt;|&quot;linkwarden_save REST&quot;| LW
+TREG --&gt;|&quot;spine distill CLI&quot;| WIKIG
+TREG --&gt;|&quot;read/write memory SQL&quot;| T_MEM
+TREG --&gt;|&quot;L2 notebook SQL&quot;| T_CTX
+TREG --&gt;|&quot;practice_emit SQL&quot;| T_PRAC
+
+%% extension internals
+SW --&gt;|&quot;chrome.tabs messaging&quot;| CS_YT
+SW --&gt;|&quot;chrome.tabs messaging&quot;| CS_FIGMA
+SW --&gt;|&quot;chrome.tabs messaging&quot;| CS_ARXIV
+CS_YT --&gt;|&quot;PLAYER_EVENT watch pct&quot;| SW
+CS_FIGMA --&gt;|&quot;STEP_OUTCOME DOM_TRACE_BATCH&quot;| SW
+CS_ARXIV --&gt;|&quot;PAGE_CONTEXT_UPDATE highlights&quot;| SW
+REC --&gt;|&quot;normalized traces&quot;| SW
+SNIFF --&gt;|&quot;MEDIA_CAPTURED&quot;| SW
+SW --&gt;|&quot;telemetry POST&quot;| APIR
+APIR --&gt;|&quot;SQL&quot;| T_VFB
+APIR --&gt;|&quot;SQL&quot;| T_BEATS
+APIR --&gt;|&quot;SQL&quot;| T_SIG
+CLIENTREG --&gt;|&quot;session keyed routing&quot;| SW</code></pre>
+</div>
+
+<p>Transport legend: <code>HTTPS</code> = provider/Data-API calls ·
+<code>SSE</code> = <code>/api/turn</code> event stream ·
+<code>WS (proposed)</code> = extension duplex upgrade path ·
+<code>chrome.tabs/SW messaging</code> = in-extension IPC ·
+<code>spawn CLI</code> = child-process invocation of
+<code>agent-reach</code> / <code>wg</code> binaries ·
+<code>stdio/HTTP</code> = Scrapling sidecar JSON bridge (same pattern as
+the retired python transcript bridge) · <code>REST</code> = Linkwarden
+API with API keys.</p>
+<hr />
+<h1 id="2-brain-internals">2. Brain Internals</h1>
+<h2 id="2a-capability--tool-matrix">2a. Capability → Tool Matrix</h2>
+<p>Mounting policy = <code>composeEnabledTools</code>: user toggles ∩
+capability whitelist → context-gated auto-mounts → capability-owned →
+always-on (A5). Persona defaults from built-in dojo-mentor / peer /
+examiner loaders plus user-created personas (A3).</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Mounted tools</th>
+<th>Auto-mount conditions</th>
+<th>Persona default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>tutor_chat</td>
+<td>find_video, get_transcript, get_beats, read_memory, write_memory,
+read_skill, ask_user, search_web, reach_query, find_resources,
+whiteboard_render</td>
+<td>reach_query when topic matches community-signal domains (Reddit/X);
+whiteboard_render when user asks "draw/explain visually"; get_beats when
+session bound to a long video</td>
+<td>dojo-mentor</td>
+</tr>
+<tr>
+<td>architect</td>
+<td>search_web, reach_query, find_resources, read_memory, write_memory,
+read_skill, ask_user</td>
+<td>reach_query for practitioner signals during skeleton validation;
+read_memory eager (profile + interest graph feed tailoring)</td>
+<td>dojo-mentor</td>
+</tr>
+<tr>
+<td>examiner</td>
+<td>get_beats, read_memory, ask_user, practice_emit,
+whiteboard_render</td>
+<td>get_beats auto-mounted when exam pulls failed beats as material
+(B5); deterministic spine forces grade call before verdict</td>
+<td>examiner</td>
+</tr>
+<tr>
+<td>nexus_curator</td>
+<td>read_memory, reach_query, wiki_spine (proposed), read_skill</td>
+<td>wiki_spine when distilling profile_signals into knowledge_nodes
+(E10, wiki-graph-style spine distillation)</td>
+<td>peer</td>
+</tr>
+<tr>
+<td>roadmap_surgeon</td>
+<td>find_video, get_beats, read_memory, write_memory, ask_user</td>
+<td>find_video on any chapter swap proposal; auto-mounts when E4 flags
+👎×N module</td>
+<td>dojo-mentor</td>
+</tr>
+<tr>
+<td>conversation_guide</td>
+<td>read_memory, ask_user, practice_emit</td>
+<td>practice_emit when bound to an active PracticePlan session</td>
+<td>peer</td>
+</tr>
+<tr>
+<td>explain_board</td>
+<td>whiteboard_render (owned), read_memory</td>
+<td>always owns whiteboard_render; diagram-planner sub-agents run inside
+(C2)</td>
+<td>dojo-mentor</td>
+</tr>
+<tr>
+<td>deep_research</td>
+<td>search_web, reach_query, find_video, get_transcript, find_resources,
+linkwarden_save, read_memory, write_memory, ask_user</td>
+<td>full stack mounted by definition (A6); linkwarden_save archives
+every accepted source (E11)</td>
+<td>dojo-mentor</td>
+</tr>
+</tbody>
+</table>
+<p>Always-on (all capabilities): read_skill manifest injection, ask_user
+availability. Deferred/progressive disclosure applies to heavy tools
+(reach_query, find_resources) per A5.</p>
+<h2 id="2b-anatomy-of-one-turn">2b. Anatomy of one turn</h2>
+<p>Example: tutor_chat turn — <em>"explain kubernetes operators and find
+me a good video"</em>.</p>
+<ol type="1">
+<li><strong>Request parse</strong> —
+<code>POST /api/turn {capability:"tutor_chat", message, sessionId, history}</code>.
+Route validates body, resolves sessionId (or mints UUID). <em>(Today the
+route accepts <code>mode</code>; A2 renames it to
+<code>capability</code>.)</em></li>
+<li><strong>Context build</strong> — orchestrator builds
+<code>TurnContext</code>: history, tri-state enabledTools,
+persona_context, skills_manifest, metadata.waitForUserReply callback.
+Injection points:
+<ul>
+<li><strong>[L1]</strong> working scratchpad assembled: current
+chapter/videoId, open questions, windowed prior tool results — always
+injected.</li>
+<li><strong>[L2]</strong> project notebook
+(<code>learning_contexts</code>) queried; injected only on topic match
+against highlights/notes.</li>
+<li><strong>[L3]</strong> durable profile (<code>memory_docs</code>)
+concatenated eagerly into the memory prompt block.</li>
+</ul></li>
+<li><strong>Prompt assembly</strong> — fixed block precedence (A3):
+general → policy → loop contract → capability playbook → persona →
+memory [L3 here] → tools → skills. Byte-stable system prompt; volatile
+seeds (search hints, L1 scratchpad) appended to the <em>user</em>
+message, never the system prompt.</li>
+<li><strong>Provider stream round 1</strong> — AgentLoop calls
+<code>provider.stream(messages, tools)</code>. Text deltas emit
+<code>CONTENT</code>; reasoning emits <code>THINKING</code>.</li>
+<li><strong>Tool-call round</strong> — model returns functionCalls
+instead of finishing. Each call emits
+<code>TOOL_CALL {name, args}</code>.</li>
+<li><strong>Parallel dispatch</strong> — calls executed concurrently,
+cap raised 4→8 (A5), dedupe + missing-arg guard. <code>find_video</code>
+runs Data-API-first search with VideoSpec bands;
+<code>get_transcript</code> hits the transcript route.</li>
+<li><strong>functionResponse</strong> — each result emits
+<code>TOOL_RESULT {name, content, sources}</code>; SOURCES event carries
+citation payloads; results appended as model/function parts.</li>
+<li><strong>Round 2</strong> — loop continues; this round has no tool
+calls ⇒ its streamed text IS the final answer (DeepTutor
+semantics).</li>
+<li><strong>RESULT</strong> — bus.result({finalText, rounds, toolSteps,
+cost_summary}) via emit_capability_result carrying {response, completed,
+engine stats, cost_summary}.</li>
+<li><strong>DONE</strong> — orchestrator guarantees terminal DONE even
+on ERROR paths.</li>
+<li><strong>Memory writes</strong> — post-turn: L1 discarded; salient
+facts → write_memory into <code>memory_docs</code> (L3);
+notes/highlights → <code>learning_contexts</code> (L2). <em>(Proposed:
+automatic extraction pass; v1 may rely on explicit write_memory tool
+calls.)</em></li>
+</ol>
+<p>Event firing map: SESSION at step 1 · STAGE_START/END around context
+build and any capability stages · THINKING during provider reasoning ·
+CONTENT deltas steps 4/8 · TOOL_CALL step 5 · TOOL_RESULT + SOURCES step
+7 · RESULT step 9 · DONE step 10 · WAIT_FOR_INPUT whenever ask_user
+pauses (step 7 variant).</p>
+<h2 id="2c-tool-schemas">2c. Tool schemas</h2>
+<p>Owner column: <strong>platform</strong> = implemented server-side in
+Next.js routes/lib; <strong>extension</strong> = dispatched via A9
+command channel to a tab; <strong>hybrid</strong> = platform
+orchestrates, extension executes.</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Description</th>
+<th>Parameters (JSON-ish)</th>
+<th>Owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>find_video</td>
+<td>Scored YouTube search honoring chapter VideoSpec bands; supports
+exclusion ids for 👎 swaps</td>
+<td><code>{query, targetDurationBand?: "short"|"medium"|"long", expectedMinutes?: [min,max], language?, excludeIds?: string[], depth?}</code>
+→ <code>{videoId,score,reason}[]</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>find_resources</td>
+<td>Non-video resources (docs/repos/papers/interactive) via Scrapling
+allowlist + sniffer merge; pgvector semantic match; judge-scored</td>
+<td><code>{concept, resourceTypes?: string[], level?, language?, limit?}</code>
+→ <code>{resourceId,score,reason}[]</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>get_transcript</td>
+<td>Transcript text for a videoId (multi-provider forge w/ circuit
+breaker)</td>
+<td><code>{videoId, lang?}</code> →
+<code>{text, source, segments?}</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>get_beats</td>
+<td>Beat windows + check results for a long video</td>
+<td><code>{videoId}</code> →
+<code>{beats:[{index,startSec,endSec,title,checkType}], masteryPct}</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>read_memory</td>
+<td>Read L3 profile docs (concat-on-inject semantics)</td>
+<td><code>{scope?: "preferences"|"style"|"goals", query?}</code> →
+<code>{docs: string[]}</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>write_memory</td>
+<td>Persist a durable preference/fact to L3</td>
+<td><code>{kind, content, confidence?}</code> →
+<code>{ok, docId}</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>read_skill</td>
+<td>Lazy-load a skill body from the manifest</td>
+<td><code>{skillName}</code> → <code>{body}</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>ask_user</td>
+<td>Pause turn awaiting user reply (WAIT_FOR_INPUT, not terminate)</td>
+<td><code>{question, options?: string[], timeoutSec?}</code> →
+<code>{reply}</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>search_web</td>
+<td>General web search (Exa via agent-reach MCP / Jina Reader
+fallback)</td>
+<td><code>{query, maxResults?}</code> →
+<code>{title,url,snippet}[]</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>reach_query</td>
+<td>Fan out to agent-reach CLI channels: Reddit threads, X posts,
+GitHub, LinkedIn public pages, Bilibili, XiaoHongShu</td>
+<td><code>{channel: "reddit"|"twitter"|"github"|"linkedin"|"youtube"|"bilibili"|"xiaohongshu", action: "search"|"read", target, limit?}</code>
+→ normalized items</td>
+<td>platform (spawns CLI)</td>
+</tr>
+<tr>
+<td>linkwarden_save</td>
+<td>Archive a URL in self-hosted Linkwarden with tags/annotation; dedupe
+vs vault</td>
+<td><code>{url, tags?: string[], note?}</code> →
+<code>{linkwardenId, archived}</code></td>
+<td>platform</td>
+</tr>
+<tr>
+<td>whiteboard_render</td>
+<td>Emit typed draw commands for a concept chunk via diagram-planner
+pipeline</td>
+<td><code>{topic, diagramType?: "flowchart"|"sequence"|"comparison"|"timeline"|"state"|"mindmap"}</code>
+→ streams NARRATION + DRAW_DELTA</td>
+<td>platform</td>
+</tr>
+<tr>
+<td>practice_emit</td>
+<td>Write a practice/mastery datapoint (step outcome, remediation
+rung)</td>
+<td><code>{planId, stepIndex, outcome, latencyMs?, hintLevel?}</code> →
+<code>{ok}</code></td>
+<td>hybrid (extension reports, platform writes)</td>
+</tr>
+<tr>
+<td>guidance_command</td>
+<td>Send one A9 command to a bound tab (used by GuideAgent loops)</td>
+<td><code>{tabClientId, command, payload}</code> →
+<code>{ack}</code></td>
+<td>hybrid</td>
+</tr>
+</tbody>
+</table>
+<h2 id="2d-deep-research-fan-out">2d. Deep research fan-out</h2>
+<p><code>deep_research</code> (A6) runs one orchestrating AgentLoop that
+spawns bounded parallel sub-loops, each a specialist with its own small
+round budget and tool whitelist:</p>
+<ol type="1">
+<li><strong>scout</strong> decomposes the question into 3–6
+sub-questions + success criteria. Input: raw question + L3 profile.
+Output: research plan (STAGE_START <code>scout</code>).</li>
+<li>Nine specialists run as parallel bounded sub-loops (each ≤3 rounds,
+≤4 tools):
+<ul>
+<li><strong>source-hunter</strong>: inputs = sub-questions; outputs =
+web/doc citations; uses search_web + <strong>reach_query</strong>
+(Reddit threads, X posts — real practitioners' opinions).</li>
+<li><strong>video-scout</strong>: Data API multi-query fan-out per
+sub-question → candidate pools.</li>
+<li><strong>transcript-miner</strong>: inputs = winning videoIds;
+outputs = evidence excerpts.</li>
+<li><strong>resource-curator</strong>: Scrapling allowlist crawl +
+cat-catch-compatible rules → Resource objects; reach_query for
+community-curated lists.</li>
+<li><strong>gap-analyzer</strong>: inputs = merged findings-so-far;
+outputs = missing angles → follow-up queries fed back to scout (one
+feedback cycle max).</li>
+<li><strong>outline-architect</strong>: teaching order over validated
+findings.</li>
+<li><strong>critic</strong>: fact-check/contradiction pass over all
+claims; flags unsupported ones.</li>
+<li><strong>synthesizer</strong>: merges into cited brief.</li>
+<li><em>(ninth slot)</em> <strong>cost/budget auditor
+(proposed)</strong>: tracks spend, enforces caps — masterplan says "8–9
+specialists"; the ninth is either gap-analyzer split or this.</li>
+</ul></li>
+<li><strong>Merge/critic ordering</strong>: synthesizer output passes
+through critic before RESULT; critic vetoes become gaps, not silent
+drops.</li>
+<li><strong>Streaming</strong>: every specialist emits
+THINKING/SOURCES/STAGE events tagged with its name so the UI shows live
+fan-out progress.</li>
+<li><strong>Cost caps</strong>: global per-turn budget (rounds ×
+specialists), daily learner budget (Phase F quota discipline), hard cap
+on reach_query spawns and Data API units (~100 free searches/day).
+Result = cited brief + sources + gaps → optional auto-roadmap patch
+proposal handed to architect/roadmap_surgeon.</li>
+</ol>
+<hr />
+<h1 id="3-feature-pairing-map">3. Feature Pairing Map</h1>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Platform component(s)</th>
+<th>Pairs-with (consumes ⇄ exposes)</th>
+<th>Activation trigger in user flow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A1 schema+auth</td>
+<td>Supabase migrations, Supabase Auth, RLS</td>
+<td>consumes: nothing · exposes: user_id threading to ALL features
+below</td>
+<td>sign-in gate on first load</td>
+</tr>
+<tr>
+<td>A2 UnifiedContext+registry+/api/turn</td>
+<td>brain core, TurnBus, orchestrator</td>
+<td>consumes A1 · exposes: single SSE entry point for every capability
+&amp; client</td>
+<td>any AI interaction</td>
+</tr>
+<tr>
+<td>A3 prompt assembler+personas+Persona Studio</td>
+<td>assembler.ts, personas table, chat dock selector</td>
+<td>consumes A2 · exposes: tone+voice to explain_board C5, examiner</td>
+<td>persona switch in dock</td>
+</tr>
+<tr>
+<td>A4 memory L1/L2/L3</td>
+<td>memory service, learning_contexts, memory_docs</td>
+<td>consumes A1,A2 · consumed by: all capabilities, D4 recorder, D6
+copilot, E10 graph</td>
+<td>automatic per-turn</td>
+</tr>
+<tr>
+<td>A5 ToolRegistry+mounting</td>
+<td>registry.ts, compose.ts</td>
+<td>consumes A2 · consumed by A6, A8, A9 guide agents</td>
+<td>every turn</td>
+</tr>
+<tr>
+<td>A6 deep_research</td>
+<td>9-specialist fan-out</td>
+<td>consumes A5, E9 agent-reach · exposes briefs to architect, E4</td>
+<td>"research X" request in dock</td>
+</tr>
+<tr>
+<td>A7 providers</td>
+<td>gemini.ts+groq.ts ChatProvider</td>
+<td>consumes A2 · consumed by everything</td>
+<td>transparent</td>
+</tr>
+<tr>
+<td>A8 capability cutover waves</td>
+<td>tutor_chat/architect/examiner/nexus_curator/roadmap_surgeon/conversation_guide</td>
+<td>consumes A3–A5 · deletes 8 legacy routes</td>
+<td>respective UI surfaces</td>
+</tr>
+<tr>
+<td>A9 remote client fabric</td>
+<td>client registry, duplex channel, GuideAgent loops</td>
+<td>consumes A2,A5 · foundation for D1,D3,D5</td>
+<td>extension connects</td>
+</tr>
+<tr>
+<td>B1 beat player</td>
+<td>player seek/sync</td>
+<td>consumes shipped beats API · pairs B2</td>
+<td>open long-video chapter</td>
+</tr>
+<tr>
+<td>B2 check gates</td>
+<td>quiz/summary/flowchart/minigames</td>
+<td>consumes B1 · exposes fail events to B3</td>
+<td>beat end pause</td>
+</tr>
+<tr>
+<td>B3 remediation ladder</td>
+<td>hint→whiteboard→recap→alt-video</td>
+<td>consumes B2, C1–C3 whiteboard, M5</td>
+<td>check failure</td>
+</tr>
+<tr>
+<td>B4 progress/resume/spaced-rep</td>
+<td>beat_progress table</td>
+<td>consumes B3, A1 · exposes failed-beat queue to B5, E4</td>
+<td>next session start</td>
+</tr>
+<tr>
+<td>B5 mastery gating</td>
+<td>feynman_passed wiring in user_progress</td>
+<td>consumes B4, A8 examiner · locks modules</td>
+<td>journey completion</td>
+</tr>
+<tr>
+<td>C1 diagram grammar</td>
+<td>templates+layout engine</td>
+<td>consumed by C2, B3, explain_board</td>
+<td>whiteboard turns</td>
+</tr>
+<tr>
+<td>C2 planner sub-agents</td>
+<td>chunker→type-selector→layout→drawer→critic</td>
+<td>consumes C1, A6 pattern</td>
+<td>explain_board turn</td>
+</tr>
+<tr>
+<td>C3 streaming scenes</td>
+<td>scene-by-scene NARRATION+DRAW_DELTA</td>
+<td>consumes C2</td>
+<td>live board</td>
+</tr>
+<tr>
+<td>C4 persistence/export</td>
+<td>saved boards, PNG/SVG</td>
+<td>consumes C1 · writes L2 exports (A4)</td>
+<td>save/share</td>
+</tr>
+<tr>
+<td>C5 voice upgrade</td>
+<td>voice selection per persona</td>
+<td>consumes A3</td>
+<td>studio settings</td>
+</tr>
+<tr>
+<td>D1 transport+Side Panel port</td>
+<td>duplex channel, panel UI</td>
+<td>consumes A9 · consumed by D2–D7</td>
+<td>extension connect</td>
+</tr>
+<tr>
+<td>D2 watch-page mode</td>
+<td>youtube CSS strip content script</td>
+<td>consumes D1 · feeds PLAYER_EVENT to video_feedback</td>
+<td>raw YouTube link click</td>
+</tr>
+<tr>
+<td>D3 practice engine port</td>
+<td>FolloMe resolver stack ~1.5k LOC + 200-line controller</td>
+<td>consumes D1, A9 · exposes STEP_OUTCOME to D5, practice_emit</td>
+<td>implementation-depth chapter</td>
+</tr>
+<tr>
+<td>D4 recorder agent</td>
+<td>consent-gated trace capture</td>
+<td>consumes D1, A4 · writes L2 entries + exemplar_store</td>
+<td>managed session toggle ON</td>
+</tr>
+<tr>
+<td>D5 live guide agent</td>
+<td>brain-spawned GuideAgent per tab</td>
+<td>consumes A9, D3 · drives overlay/hints</td>
+<td>practice session active</td>
+</tr>
+<tr>
+<td>D6 research copilot</td>
+<td>arXiv extractor + walkthrough</td>
+<td>consumes D1, A4 · highlights→L2</td>
+<td>arXiv page open</td>
+</tr>
+<tr>
+<td>D7 resource sniffer</td>
+<td>cat-catch-lineage capture</td>
+<td>consumes D1 · feeds E5/E8, E11 archive</td>
+<td>lecture page media detected</td>
+</tr>
+<tr>
+<td>D8 token auth+security</td>
+<td>platform tokens, MV3 lifecycle fix</td>
+<td>consumes A1, D1</td>
+<td>extension pairing</td>
+</tr>
+<tr>
+<td>E1 learner profile</td>
+<td>onboarding v2, profile table</td>
+<td>consumed by E2 judge, E7, personas</td>
+<td>onboarding</td>
+</tr>
+<tr>
+<td>E2 operator QueryBuilder</td>
+<td>dual-artifact queries</td>
+<td>consumes E1 · feeds find_video, E5</td>
+<td>every search</td>
+</tr>
+<tr>
+<td>E3 learned video weights</td>
+<td>nightly SQL aggregation</td>
+<td>consumes M4 video_feedback data · feeds rubric</td>
+<td>nightly job</td>
+</tr>
+<tr>
+<td>E4 roadmap self-healing</td>
+<td>👎×N flags, remedial proposals</td>
+<td>consumes E3, A8 architect</td>
+<td>repeated dislikes/failures</td>
+</tr>
+<tr>
+<td>E5 multi-scraper engine</td>
+<td>Scrapling sidecar + recipes</td>
+<td>consumes E1 · feeds E8, D7 merge</td>
+<td>resource lookup</td>
+</tr>
+<tr>
+<td>E6 resource feedback</td>
+<td>resource_feedback table + card UI</td>
+<td>consumes A1 · feeds E7</td>
+<td>👍/👎/bookmark on hub card</td>
+</tr>
+<tr>
+<td>E7 resource personalization</td>
+<td>type/domain weights</td>
+<td>consumes E6, E1 · orders find_resources + hub</td>
+<td>ranking time</td>
+</tr>
+<tr>
+<td>E8 find_resources+semantic match</td>
+<td>pgvector tool</td>
+<td>consumes E5, A5</td>
+<td>mid-turn brain call</td>
+</tr>
+<tr>
+<td>E9 deep-profile onboarding</td>
+<td>GitHub/LinkedIn/YouTube connectors, agent-reach,
+profile_signals</td>
+<td>consumes agent-reach · feeds E10, A6 specialists</td>
+<td>optional "connect more of you" step</td>
+</tr>
+<tr>
+<td>E10 interest knowledge graph</td>
+<td>knowledge_nodes/node_edges + wiki-graph spine distillation</td>
+<td>consumes E9, A4, A8 · consumed by architect/examiner/E7/persona
+inference</td>
+<td>after signal ingestion</td>
+</tr>
+<tr>
+<td>E11 Linkwarden preservation</td>
+<td>Linkwarden API integration</td>
+<td>consumes E5, D7 · reads annotations back to L2</td>
+<td>every captured resource</td>
+</tr>
+</tbody>
+</table>
+<p>Shared seams: <strong>A9 fabric</strong> (D-phase backbone),
+<strong>A4 memory</strong> (everything reads/writes it), <strong>E9
+signals store</strong> (feeds graph, personalization, research).</p>
+<hr />
+<h1 id="4-user-workflow-narratives">4. User Workflow Narratives</h1>
+<h2 id="j1--first-run--optional-profile-onboarding">J1 — First-run +
+optional profile onboarding</h2>
+<ol type="1">
+<li>User → opens app unauthenticated → redirected to sign-in (A1
+Supabase Auth).</li>
+<li>System → creates profile row; default dojo-mentor persona active
+(A3).</li>
+<li>User → onboarding v2: role/level/language/goals → written to profile
+(E1) and L3 memory_docs via write_memory.</li>
+<li>User → optional "Connect more of you" (E9): clicks GitHub
+connector.</li>
+<li>System → spawns <code>agent-reach</code> GitHub channel
+(<code>gh repo view</code>/search) → repos, languages, stars → skill-map
+signals → <code>profile_signals</code> rows.</li>
+<li>User → opts into LinkedIn → system runs agent-reach linkedin channel
+(public page reader: Jina Reader fallback) → career/skills signals →
+profile_signals.</li>
+<li>User → opts into YouTube self-data → OAuth watch-history import (or
+yt-dlp local playlist import) → profile_signals.</li>
+<li>System → archives every ingested source URL via linkwarden_save
+(E11) for permanent exportable library.</li>
+<li>System → nexus_curator distills signals + wiki-graph-style spine
+distillation into knowledge_nodes/node_edges (E10); persona inference
+may suggest "hands-on DevOps learner".</li>
+<li>Skip path: user clicks "skip" at any connector → default persona,
+empty graph, zero signals stored; nothing mandatory.</li>
+</ol>
+<h2 id="j2--learn-a-chapter-end-to-end">J2 — Learn a chapter
+end-to-end</h2>
+<ol type="1">
+<li>User → enters topic "Terraform" → architect capability generates
+roadmap (topology→research→skeleton→validate spine, A8) with VideoSpec
+per chapter (ADR-V2).</li>
+<li>System → for chapter 1, find_video tool: QueryBuilder dual-artifact
+(E2) → Data API search with duration band → rubric score → scored LLM
+judge <code>{videoId,score,reason}[]</code> → winner + alternatives
+rendered with judge badges.</li>
+<li>User → opens chat dock, asks questions → tutor_chat turn;
+get_transcript grounds the answer; L1/L2/L3 injected per layer policy
+(2b).</li>
+<li>User → dislikes the pick ("too advanced") → video_feedback row →
+cache bust → find_video re-runs with excludeIds + reason folded into
+query expansion → new pick streams into same UI, no reload (fast-path
+swap).</li>
+<li>System → dislike counted toward E4 module flagging (👎×2 same module
+→ regeneration proposal card).</li>
+</ol>
+<h2 id="j3--7-hour-mastery-journey">J3 — 7-hour mastery journey</h2>
+<ol type="1">
+<li>System → beats API splits 7h video into 8–12 min windows with checks
+(shipped).</li>
+<li>User → starts journey; embedded player seeks to beat.startSec (B1);
+current-beat highlight rail syncs playback.</li>
+<li>System → at beat end pauses → check gate (B2): flowchart
+reconstruction for this beat — learner places nodes, connects edges,
+validated vs gold graph.</li>
+<li>User → fails twice.</li>
+<li>System → remediation ladder (B3): inline hint → auto explain_board
+turn scoped to THAT beat's transcript → whiteboard re-explains with
+typed diagram grammar (C1–C3), streamed scene-by-scene → micro-recap
+clip (beat summary TTS) → alternative-video fallback offer.</li>
+<li>User → retries reconstruction → passes → beat_progress records
+attempts, score, remediation used (B4).</li>
+<li>User → closes browser mid-journey.</li>
+<li>System → next session: resume banner restores exact beat; two
+previously failed beats resurface via spaced-repetition queue (B4).</li>
+<li>System → journey completion feeds examiner state; Feynman gate (A8)
+blocks module advance until feynman_passed; examiner can pull any failed
+beat as exam material (B5).</li>
+</ol>
+<h2 id="j4--deep-research-request">J4 — Deep research request</h2>
+<ol type="1">
+<li>User → dock: "compare terraform state backends — what do
+practitioners say?"</li>
+<li>System → /api/turn capability=deep_research → scout decomposes into
+sub-questions (S3 locking backends vs remote, consensus tradeoffs,
+migration stories).</li>
+<li>System → nine specialists fan out (2d): source-hunter runs
+reach_query on Reddit r/Terraform threads + X posts for practitioner war
+stories; video-scout multi-query Data API; transcript-miner extracts
+evidence; resource-curator crawls HashiCorp docs via Scrapling;
+gap-analyzer requests one more angle (S3 lockfile conflicts).</li>
+<li>System → critic fact-checks claims, flags contradictions;
+synthesizer merges cited brief; STAGE/SOURCES events stream live per
+specialist.</li>
+<li>System → RESULT: cited brief + sources + gaps; every accepted source
+linkwarden_save'd (E11); optional patch proposal: "add a migration
+chapter?" → user accepts → roadmap_surgeon patches plan.</li>
+</ol>
+<h2 id="j5--extension-guided-practice-in-figma">J5 — Extension-guided
+practice in Figma</h2>
+<ol type="1">
+<li>System → implementation-depth chapter emits PracticePlan (ordered
+steps, anchor chains data-testid→aria-label→text-anchor→CSS path→region
+fingerprint, hint ladder).</li>
+<li>Extension → opens Figma in managed tab; Side Panel (ported FolloMe
+panel, D1) shows step k/N.</li>
+<li>Brain → GuideAgent spawned bound to tab (A9/D5) → sends
+execute_guidance_step command; content script resolves target via
+resolver stack (ElementMatcher +50 text/+30 type/+20 aria,
+RecoveryEngine tiers), overlay draws ghost cursor + dashed bbox (FolloMe
+overlay.js lineage).</li>
+<li>Extension → PassiveTracker watches completion via capture-phase
+passive listeners; canvas-heavy detection flips to CDP
+Input.dispatchMouseEvent observation.</li>
+<li>User → stalls &gt;N sec → GuideAgent escalates hint ladder: nudge →
+explain → show-me.</li>
+<li>User → completes step → STEP_OUTCOME{status:complete} → GuideAgent
+advances plan; drift detected → RecoveryEngine re-resolves without
+losing plan position (DOMStabilityMonitor threshold 30, SyncController
+version-checked).</li>
+<li>System → practice_emit writes outcomes; D4 recorder (consent ON)
+normalizes the click/input trace into L2 notebook entry "user did X in
+Figma" + exemplar_store row.</li>
+<li>Session ends → Side Panel state done; Trace Viewer shows what was
+remembered, with delete affordance.</li>
+</ol>
+<h2 id="j6--arxiv-research-copilot-session">J6 — arXiv Research Copilot
+session</h2>
+<ol type="1">
+<li>User → opens arXiv paper → arxiv adapter extracts
+title/abstract/sections/figures (Readability fallback) →
+PAGE_CONTEXT_UPDATE.</li>
+<li>Side Panel → section-by-section walkthrough (tutor_chat bound to
+paper context); grounded Q&amp;A: "what does §3 assume?" answered with
+section text injected.</li>
+<li>User → highlights a passage + adds note → synced to L2 notebook
+(learning_contexts) as arXiv annotation (A4/D6).</li>
+<li>System → linkwarden_save archives the paper with tags; annotations
+read back into L2 on return visits (E11).</li>
+<li>System → paper entities distilled via wiki-graph-style spine pass
+into knowledge graph nodes (E10); reading telemetry feeds mastery
+signals.</li>
+</ol>
+<h2 id="j7--resource-feedback-shaping-rankings">J7 — Resource feedback
+shaping rankings</h2>
+<ol type="1">
+<li>User → Resource Hub v2 sees blog post ranked #2 for "kubernetes
+operators".</li>
+<li>User → clicks 👎 with reason chip "off-topic" → POST mirrors
+/api/feedback contract → resource_feedback row {signal:dislike, domain,
+resource_type} (E6).</li>
+<li>System → invalidates cached resource; records type/domain preference
+decrement.</li>
+<li>System → aggregation job updates per-learner TYPE weights (prefers
+docs over blogs)
+<ul>
+<li>DOMAIN priors (random blogs demoted, MDN trusted) (E7).</li>
+</ul></li>
+<li>Future → find_resources judge-style scoring reorders; Hub shows
+"because you prefer docs" ordering indicator; the disliked URL never
+resurfaces for this learner while global results stay unfiltered (ADR-V3
+mirror).</li>
+</ol>
+<hr />
+<h1 id="5-extension-contract-the-a9-fabric">5. Extension Contract (the
+A9 fabric)</h1>
+<p>Design stance (masterplan Phase D): the extension is NOT a telemetry
+sender — it is a remote endpoint the brain operates through. All
+intelligence stays server-side (ADR-V5).</p>
+<h2 id="5a-command-vocabulary-brain--extension">5a. Command vocabulary
+(brain → extension)</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Payload</th>
+<th>Semantics</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>open_player</td>
+<td><code>{videoId, mode: "embedded"|"watchpage", startSec?, autoplay?}</code></td>
+<td>open focus player (nocookie embed) or enter stripped watch-page mode
+(D2)</td>
+</tr>
+<tr>
+<td>execute_guidance_step</td>
+<td><code>{planId, stepIndex, step:{targetAnchors[], action, explanation}, hintLadder[]}</code></td>
+<td>resolve element, show overlay/ghost cursor, arm PassiveTracker (port
+of FolloMe EXECUTE_GUIDANCE + missing ~200-line controller)</td>
+</tr>
+<tr>
+<td>highlight_element</td>
+<td><code>{anchors[], style?: "bbox"|"pulse"|"ghost-cursor", ttlMs?}</code></td>
+<td>visual emphasis without executing a step</td>
+</tr>
+<tr>
+<td>show_hint</td>
+<td><code>{level: 1|2|3, text?, targetAnchors?}</code></td>
+<td>hint ladder escalation: nudge → explain → show-me</td>
+</tr>
+<tr>
+<td>navigate_to</td>
+<td><code>{url, newTab?, managed: true}</code></td>
+<td>open a managed tab (practice target, resource deep-link "open in
+managed tab")</td>
+</tr>
+<tr>
+<td>render_scene</td>
+<td><code>{sceneIndex, narration, drawCommands[]}</code></td>
+<td>mini-whiteboard render inside Side Panel (beat re-explain
+fallback)</td>
+</tr>
+<tr>
+<td>set_panel_state</td>
+<td><code>{state: "idle"|"connected"|"guiding"|"interrupted"|"done", detail?}</code></td>
+<td>drive Side Panel state machine (5c)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5b-event-vocabulary-extension--brain">5b. Event vocabulary
+(extension → brain)</h2>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Payload</th>
+<th>Consumer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>STEP_OUTCOME</td>
+<td><code>{planId, stepIndex, status: "complete"|"stalled"|"failed"|"skipped", latencyMs, dudClicks?, resolvedVia?}</code></td>
+<td>GuideAgent loop (advance/hint/re-resolve), practice_emit → mastery
+datapoints</td>
+</tr>
+<tr>
+<td>DOM_TRACE_BATCH</td>
+<td><code>{sessionId, actions:[{verb, selectorChain, timestampMs, coords?}], consentSessionId}</code></td>
+<td>D4 recorder normalization → L2 entries + exemplar_store</td>
+</tr>
+<tr>
+<td>PAGE_CONTEXT_UPDATE</td>
+<td><code>{url, site: "youtube"|"figma"|"arxiv"|"other", extracted?: {title, sections?, figures?}, canvasHeavyRatio?}</code></td>
+<td>context-extractor injection into GuideAgent/tutor_chat prompts</td>
+</tr>
+<tr>
+<td>PLAYER_EVENT</td>
+<td><code>{videoId, event: "play"|"pause"|"ended"|"seek", watchedPct, droppedAtSec?}</code></td>
+<td>video_feedback implicit signals (fixes untracked watch-% fog
+item)</td>
+</tr>
+<tr>
+<td>MEDIA_CAPTURED</td>
+<td><code>{url, contentType, kind: "pdf"|"slides"|"dataset"|"subtitle"|"segment", referrerTabId, sizeBytes?}</code></td>
+<td>D7 sniffer → E5 pipeline merge → linkwarden_save</td>
+</tr>
+</tbody>
+</table>
+<p>Envelope: all events ride the same TurnEvent shape
+(<code>type, source, sessionId, seq, timestamp</code>) — zero new server
+concepts (video_pipeline_hypothesis §3.8.1).</p>
+<h2 id="5c-side-panel-viewsstate-machine">5c. Side Panel views/state
+machine</h2>
+<pre><code>idle ──connect(token ok)──► connected ──PracticePlan received──► guiding(step k/N)
+  ▲                            │                                    │
+  │                        chat msg /                          stall ──► hint ladder 1..3
+  │                        ask_user                             │
+  │                            ▼                                ▼
+  └────── reset ◄── done ◄── interrupted(answer streaming) ◄── pause/resume</code></pre>
+<p>Views: idle (pairing/token screen) · connected (chat + progress) ·
+guiding (step cards k/N, hint visuals, ghost-cursor polish) ·
+interrupted (answer streaming inline; board/ guidance resumes mid-step
+after reply — same interrupt semantics as whiteboard) · done (summary +
+Trace Viewer link). Session continuity across tab reloads via client
+registry re-binding (D1).</p>
+<h2 id="5d-recorder-agent-rules">5d. Recorder agent rules</h2>
+<ol type="1">
+<li><strong>Consent</strong>: explicit toggle per session; nothing
+recorded outside managed sessions (D4). Toggle visible in Side Panel;
+recording indicator while active.</li>
+<li><strong>Session scoping</strong>: captures only within brain-bound
+managed tabs; traces carry <code>consentSessionId</code>; session end
+flushes and clears buffers.</li>
+<li><strong>Normalization</strong>: raw click/input/navigation/dud-click
+events → verb-normalized L2 notebook entries ("user did X in Figma")
+using the ACTION_EVENT_MAP verb set from FolloMe PassiveTracker
+(click/type/select/focus/navigate/scroll/hover/submit).</li>
+<li><strong>Exemplar store shape</strong> (proposed):
+<code>{id, userId, site, planId, stepIndex, anchorChain, actionVerb, outcome, latencyMs, createdAt}</code>
+— future guidance plans retrieve exemplars to pre-select anchors and
+predict stall points.</li>
+<li><strong>Deletion</strong>: Trace Viewer lists recorded traces with
+delete; deletion cascades to exemplar_store rows.</li>
+</ol>
+<hr />
+<h1 id="6-phase-linkage-dag">6. Phase Linkage DAG</h1>
+<div class="mermaid">
+graph TD
+    A1["A1 schema+auth"] --> A2["A2 context+registry+turn"]
+    A2 --> A3["A3 assembler+personas"]
+    A2 --> A4["A4 memory L1-L3"]
+    A2 --> A5["A5 tool registry+mounting"]
+    A1 --> A4
+    A5 --> A6["A6 deep_research"]
+    A2 --> A7["A7 providers"]
+    A3 --> A8["A8 capability cutover"]
+    A4 --> A8
+    A5 --> A8
+    A2 --> A9["A9 remote client fabric"]
+    A5 --> A9
+
+<pre><code>B1[&quot;B1 beat player&quot;] --&gt; B2[&quot;B2 check gates&quot;]
+B2 --&gt; B3[&quot;B3 remediation ladder&quot;]
+B3 --&gt; B4[&quot;B4 progress+resume&quot;]
+B4 --&gt; B5[&quot;B5 mastery gating&quot;]
+C1[&quot;C1 diagram grammar&quot;] --&gt; C2[&quot;C2 planner sub-agents&quot;]
+C2 --&gt; C3[&quot;C3 streaming scenes&quot;]
+C1 --&gt; C4[&quot;C4 persistence+export&quot;]
+A3 --&gt; C5[&quot;C5 voice upgrade&quot;]
+C1 --&gt; B3
+A6 --&gt; C2
+
+A9 --&gt; D1[&quot;D1 transport+side panel&quot;]
+D1 --&gt; D2[&quot;D2 watch-page mode&quot;]
+D1 --&gt; D3[&quot;D3 practice engine port&quot;]
+D1 --&gt; D4[&quot;D4 recorder agent&quot;]
+A4 --&gt; D4
+A9 --&gt; D5[&quot;D5 live guide agent&quot;]
+D3 --&gt; D5
+D1 --&gt; D6[&quot;D6 research copilot&quot;]
+A4 --&gt; D6
+D1 --&gt; D7[&quot;D7 resource sniffer&quot;]
+A1 --&gt; D8[&quot;D8 token auth+security&quot;]
+D1 --&gt; D8
+
+A1 --&gt; E1[&quot;E1 learner profile&quot;]
+E1 --&gt; E2[&quot;E2 operator querybuilder&quot;]
+E3[&quot;E3 learned video weights&quot;] --&gt; E4[&quot;E4 roadmap self-healing&quot;]
+A8 --&gt; E4
+E1 --&gt; E5[&quot;E5 multi-scraper engine&quot;]
+E1 --&gt; E6[&quot;E6 resource feedback&quot;]
+E6 --&gt; E7[&quot;E7 resource personalization&quot;]
+E1 --&gt; E7
+E5 --&gt; E8[&quot;E8 find_resources+pgvector&quot;]
+A5 --&gt; E8
+E9[&quot;E9 deep-profile onboarding&quot;] --&gt; E10[&quot;E10 interest knowledge graph&quot;]
+A4 --&gt; E10
+A8 --&gt; E10
+E5 --&gt; E11[&quot;E11 linkwarden preservation&quot;]
+D7 --&gt; E11
+E9 -.-&gt;|&quot;agent-reach transport&quot;| A6
+E9 -.-&gt;|&quot;signals&quot;| E5
+B4 -.-&gt;|&quot;failure data&quot;| E4
+E3 -.-&gt;|&quot;M4 video_feedback data&quot;| E3</code></pre>
+</div>
+
+<p>Shared seams highlighted: <strong>A9 fabric</strong> — every D
+feature hangs off it; <strong>A4 memory</strong> — consumed by A8
+capabilities, D4 recorder, D6 copilot, E10 graph; <strong>E9 signals
+store</strong> — feeds E5 recipes, E10 graph, and A6's
+source-hunter/resource-curator/gap-analyzer specialists.</p>
+<hr />
+<h1 id="7-open-integration-decisions">7. Open Integration Decisions</h1>
+<p>Needing USER input before build:</p>
+<ul>
+<li><strong>WS-vs-SSE duplex</strong>: ADR-001 says SSE now, extend WS
+only when extension demands duplex; D1 needs true bidirectional traffic.
+Decide: ship SSE+POST upchannel first, or commit to WS (and which server
+— Next.js route handler limits vs custom server)?</li>
+<li><strong>Linkwarden hosting</strong>: self-hosted instance sizing
+(README: free self-host requires deploying/maintaining a server;
+official Cloud is paid) — local Docker on dev box, VPS, or Linkwarden
+Cloud? Determines E11 API base + storage budget.</li>
+<li><strong>LinkedIn public-page compliance posture</strong>:
+agent-reach routes LinkedIn via mcp-server-linkedin (browser automation)
+or Jina Reader public pages; ToS posture unresolved in Fog of War.
+Public-pages-only via Jina, or accept browser-automation risk for richer
+profile reads?</li>
+<li><strong>YouTube OAuth scope</strong>: watch-history/subscriptions
+reads need OAuth approval + quota; approve the scope for E9's YouTube
+self-data connector, or ship yt-dlp local import only?</li>
+<li><strong>agent-reach cookie custody</strong>: cookies/tokens live in
+<code>~/.agent-reach/config.yaml</code> locally by design; if
+reach_query runs server-side, do we require user-local CLI mode
+(privacy-safe, ops-heavy) or custody cookies on the server (convenient,
+riskier)? Reddit/X/Bilibili/XiaoHongShu channels all depend on this
+choice.</li>
+<li><strong>Playwright MCP adoption</strong>: masterplan mentions
+optional Playwright MCP for ad-hoc agent exploration of the running app;
+Scrapling also ships an MCP server. Adopt MCP clients in the brain now
+(unified tool surface) or keep both as dev-only utilities?</li>
+</ul>
+<p>Related but lower-stakes (carried from Fog of War, not blocking):
+Scrapling sidecar local-vs-managed, embedding dim migration (1536
+OpenAI-shaped vs Gemini), arXiv bulk fetch ToS, profile_signals
+retention privacy policy, per-learner/day cost ceiling.</p>
+</body>
+</html>
