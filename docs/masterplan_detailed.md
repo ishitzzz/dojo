@@ -628,3 +628,19 @@ Needing USER input before build:
 Related but lower-stakes (carried from Fog of War, not blocking): Scrapling sidecar
 local-vs-managed, embedding dim migration (1536 OpenAI-shaped vs Gemini), arXiv bulk
 fetch ToS, profile_signals retention privacy policy, per-learner/day cost ceiling.
+
+---
+
+# 8. Front-end Access Map (v2.5 features)
+
+Where each v2.5 feature surfaces in the UI, how the user enters it, and what appears.
+
+| Feature | WHERE (surface) | Entry interaction | What appears |
+|---|---|---|---|
+| E13 Patterns Dashboard | `/dashboard/patterns` page route proposal, linked from Workspace sidebar tab "Patterns" | click sidebar tab → dashboard loads | time-of-day habit heatmap, strong/weak topic map (interest graph), stuck-question carousel w/ retry buttons, completion/time-per-resource charts |
+| E12 analytics consent toggle | first-run gate inside `/dashboard/patterns` + learner profile settings page | first Patterns Dashboard visit (or settings edit) | consent toggle screen: explicit opt-in, plain-language list of collected data (sessions, clicks, watch-%; no keystrokes) |
+| E14 restructuring offer | check-gate modal on imported/restructured content + Resource Hub card | repeated check-gate fails or low watch-% detected on external content | struggle-moment interstitial: "This seems tough — want it restructured for you?" accept/adjust-style buttons |
+| E14 restructuring progress + result | Resource Hub card status area / journey player | after accepting restructure offer | restructuring status card ("reformatting your video…") with progress states → before/after format switcher (original vs personalized beats/whiteboard/simplified) |
+| D9 Save-to-Dojo bookmarking | extension action menu + context menu on any page/PDF/paper | one-click "Save to Dojo" | toast confirmation → tag/type suggestion inline → link to dashboard confirmation; entry lands in Resource Hub under saved filter |
+| D9 native media import | Resource Hub card for sniffed third-party video | import confirmed from sniffer capture | native-import player state badge ("imported — journey ready"); badge links straight into its beat journey (B1–B5) |
+| D10 practice-site offer chip | extension surface bubble on arbitrary sites | page context scored against active chapter goals | non-intrusive chip: "You could practice X right here" with start / dismiss / never-on-this-site actions |
