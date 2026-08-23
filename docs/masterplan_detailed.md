@@ -275,7 +275,7 @@ sub-loops, each a specialist with its own small round budget and tool whitelist:
 | C3 streaming scenes | scene-by-scene NARRATION+DRAW_DELTA | consumes C2 | live board |
 | C4 persistence/export | saved boards, PNG/SVG | consumes C1 · writes L2 exports (A4) | save/share |
 | C5 voice upgrade | voice selection per persona | consumes A3 | studio settings |
-| D1 transport+Side Panel port | duplex channel, panel UI | consumes A9 · consumed by D2–D7 | extension connect |
+| D1 transport+Side Panel port | duplex channel, panel UI | consumes A9 · consumed by D2–D7 · **cross-platform telemetry**: every extension surface streams PLAYER_EVENT/PRACTICE_OUTCOME/PAGE_CONTEXT into the central analytics pipeline (E12) so off-platform learning counts | extension connect |
 | D2 watch-page mode | youtube CSS strip content script | consumes D1 · feeds PLAYER_EVENT to video_feedback | raw YouTube link click |
 | D3 practice engine port | FolloMe resolver stack ~1.5k LOC + 200-line controller | consumes D1, A9 · exposes STEP_OUTCOME to D5, practice_emit | implementation-depth chapter |
 | D4 recorder agent | consent-gated trace capture | consumes D1, A4 · writes L2 entries + exemplar_store | managed session toggle ON |
@@ -283,6 +283,8 @@ sub-loops, each a specialist with its own small round budget and tool whitelist:
 | D6 research copilot | arXiv extractor + walkthrough | consumes D1, A4 · highlights→L2 | arXiv page open |
 | D7 resource sniffer | cat-catch-lineage capture | consumes D1 · feeds E5/E8, E11 archive | lecture page media detected |
 | D8 token auth+security | platform tokens, MV3 lifecycle fix | consumes A1, D1 | extension pairing |
+| D9 universal bookmarking + native import | Save-to-Dojo extension action + context menu, Resource Hub entries (Linkwarden archive behind it), embedded-media import pipeline | consumes D7 sniffer, E6 resource_feedback tagging · exposes imported third-party videos as NATIVE beats/mastery journeys (B1–B5) instead of sending users elsewhere | one-click "Save to Dojo" on any page/PDF/paper; sniffed third-party video imported |
+| D10 practice-site selector agent | brain agent scoring context-extractor output (interactive elements, canvas-heaviness, login state) vs active chapter goals, generic fallback adapter | consumes A9, D3 · proactively offers "you could practice X right here" on ARBITRARY sites, not just curated ones | page context scored against active chapter goals |
 | E1 learner profile | onboarding v2, profile table | consumed by E2 judge, E7, personas | onboarding |
 | E2 operator QueryBuilder | dual-artifact queries | consumes E1 · feeds find_video, E5 | every search |
 | E3 learned video weights | nightly SQL aggregation | consumes M4 video_feedback data · feeds rubric | nightly job |
@@ -294,6 +296,9 @@ sub-loops, each a specialist with its own small round budget and tool whitelist:
 | E9 deep-profile onboarding | GitHub/LinkedIn/YouTube connectors, agent-reach, profile_signals | consumes agent-reach · feeds E10, A6 specialists | optional "connect more of you" step |
 | E10 interest knowledge graph | knowledge_nodes/node_edges + wiki-graph spine distillation | consumes E9, A4, A8 · consumed by architect/examiner/E7/persona inference | after signal ingestion |
 | E11 Linkwarden preservation | Linkwarden API integration | consumes E5, D7 · reads annotations back to L2 | every captured resource |
+| E12 behavioral analytics pipeline | unified `analytics_events` stream + sessionizer (start/end/pause/resume/return-rate), click-path capture per lesson | consumes A1, D1 telemetry from every surface (platform clicks/navigation/session boundaries; extension watch-%/practice outcomes/pauses/abandonment) · feeds E13 · privacy-scoped: consent toggle, no keystrokes | any platform or extension interaction, once consent granted |
+| E13 learning-pattern engine | aggregation of E12 + beat/practice results into the central user persona; stuck-question clustering vs excel-zones; Patterns Dashboard | consumes E12, E10 interest graph · emits pattern signals consumed by E7 ranking weights, E4 remediation proposals, examiner difficulty tuning, and the E14 restructuring trigger | after analytics sessions accumulate |
+| E14 content restructuring service | fetch/analyze external material → reformat into personal learning style (native beats journey at their pace, whiteboard explainer of hard segment, simplified-language summary, video→docs format swap); restructured version stored alongside original with provenance | consumes E13 trigger signals, B2 check gates, C1 diagram grammar | learner struggles with EXTERNAL content: low watch-% on imported video, repeated fails on restructured checks, or explicit "explain simpler" |
 
 Shared seams: **A9 fabric** (D-phase backbone), **A4 memory** (everything reads/writes
 it), **E9 signals store** (feeds graph, personalization, research).
@@ -420,6 +425,27 @@ it), **E9 signals store** (feeds graph, personalization, research).
    docs" ordering indicator; the disliked URL never resurfaces for this learner while
    global results stay unfiltered (ADR-V3 mirror).
 
+## J8 — External content struggle → native restructured journey
+
+1. User → finds a great third-party lecture video elsewhere → one-click "Save to Dojo"
+   (D9) → sniffer pulls the embedded media into the platform for NATIVE viewing →
+   instantly eligible for the full beats/mastery journey (B1–B5).
+2. User → starts watching natively; extension/platform surfaces stream
+   WATCH_PROGRESS/SESSION_BOUNDARY events (D1 telemetry) into the `analytics_events`
+   pipeline (E12).
+3. System → E12 sessionizer computes a low watch-% signal on the imported video
+   (abandonment at ~40%, repeated pauses in one segment).
+4. System → E13 pattern engine aggregates the signal with beat/practice history and
+   flags it as an external-content struggle pattern (stuck-zone vs excel-zone).
+5. System → E13 fires the restructuring trigger → E14 fetches/analyzes that material
+   (transcript/article text via transcript forge / Scrapling).
+6. System → E14 reformats into the learner's personal style: native beats journey at
+   their pace + whiteboard explainer of the hard segment (C1–C3 diagram grammar) +
+   simplified-language summary; alternative-format swap (video→docs) offered per E7
+   type weights.
+7. User → resumes the restructured version NATIVELY — beat-synced player, check gates,
+   remediation ladder — while the original stays stored alongside with provenance.
+
 ---
 
 # 5. Extension Contract (the A9 fabric)
@@ -449,6 +475,9 @@ remote endpoint the brain operates through. All intelligence stays server-side
 | PAGE_CONTEXT_UPDATE | `{url, site: "youtube"\|"figma"\|"arxiv"\|"other", extracted?: {title, sections?, figures?}, canvasHeavyRatio?}` | context-extractor injection into GuideAgent/tutor_chat prompts |
 | PLAYER_EVENT | `{videoId, event: "play"\|"pause"\|"ended"\|"seek", watchedPct, droppedAtSec?}` | video_feedback implicit signals (fixes untracked watch-% fog item) |
 | MEDIA_CAPTURED | `{url, contentType, kind: "pdf"\|"slides"\|"dataset"\|"subtitle"\|"segment", referrerTabId, sizeBytes?}` | D7 sniffer → E5 pipeline merge → linkwarden_save |
+| SESSION_BOUNDARY | `{sessionId, boundary: "start"\|"end"\|"pause"\|"resume", surface: "platform"\|"extension", tabClientId?, reason?: "navigation"\|"idle"\|"explicit"\|"reload"}` | E12 sessionizer (session grouping: start/end/pause/resume/return-rate) → click-path capture per lesson |
+| WATCH_PROGRESS | `{videoId, watchedPct, positionSec, segmentId?, event: "heartbeat"\|"abandon"\|"complete", droppedAtSec?}` | E12 behavioral analytics (watch-% implicit signals) → E13 struggle/excel-zone patterns; mirrors PLAYER_EVENT into the central pipeline so off-platform learning counts |
+| STRUGGLE_SIGNAL | `{source: "watch-%"\|"check-fails"\|"explicit-request", videoId?, beatIndex?, concept?, evidence: {watchedPct?, failedAttempts?, userPhrase?}, confidence}` | E13 pattern engine flags external-content struggle → fires E14 content-restructuring trigger; also feeds examiner difficulty tuning |
 
 Envelope: all events ride the same TurnEvent shape (`type, source, sessionId, seq,
 timestamp`) — zero new server concepts (video_pipeline_hypothesis §3.8.1).
@@ -543,6 +572,14 @@ graph TD
     A8 --> E10
     E5 --> E11["E11 linkwarden preservation"]
     D7 --> E11
+    D1 --> E12["E12 behavioral analytics pipeline"]
+    A1 --> E12
+    E12 --> E13["E13 learning-pattern engine"]
+    E10 --> E13
+    E13 --> E14["E14 content restructuring service"]
+    B2 --> E14
+    C1 --> E14
+    E13 --> E7
     E9 -.->|"agent-reach transport"| A6
     E9 -.->|"signals"| E5
     B4 -.->|"failure data"| E4
@@ -580,6 +617,13 @@ Needing USER input before build:
 - **Playwright MCP adoption**: masterplan mentions optional Playwright MCP for ad-hoc
   agent exploration of the running app; Scrapling also ships an MCP server. Adopt MCP
   clients in the brain now (unified tool surface) or keep both as dev-only utilities?
+- **Analytics consent scoping (E12)**: the behavioral analytics pipeline is
+  privacy-scoped by design (consent toggle, no keystrokes), but the scope of consent
+  needs a decision: per-surface opt-in (platform vs extension separately), per-feature
+  (telemetry for E13 personalization only vs also feeding E7 ranking/E14 triggers), and
+  retention window for `analytics_events` rows. Decide whether declining consent
+  degrades personalization gracefully (default persona, unpersonalized rankings) or
+  blocks E13/E14-dependent journeys entirely.
 
 Related but lower-stakes (carried from Fog of War, not blocking): Scrapling sidecar
 local-vs-managed, embedding dim migration (1536 OpenAI-shaped vs Gemini), arXiv bulk
